@@ -1,0 +1,6 @@
+{
+  "name": "Z1 Movies",
+  "description": "Stream and download licensed movies in HD. Modern, fast, and cinematic OTT streaming platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
