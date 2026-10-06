@@ -10,6 +10,7 @@ import { api } from '../services/api';
 interface AdminPageProps {
   user: User | null;
   onNavigateHome: () => void;
+  onOpenAuth?: () => void;
   onSelectMovie: (movie: Movie) => void;
   onPlayMovie: (movie: Movie) => void;
 }
@@ -17,6 +18,7 @@ interface AdminPageProps {
 export const AdminPage: React.FC<AdminPageProps> = ({
   user,
   onNavigateHome,
+  onOpenAuth,
   onSelectMovie,
   onPlayMovie,
 }) => {
@@ -232,17 +234,29 @@ export const AdminPage: React.FC<AdminPageProps> = ({
   if (!user || user.role !== 'admin') {
     return (
       <div className="max-w-md mx-auto px-4 py-24 text-center space-y-4">
-        <Shield className="w-12 h-12 text-red-500 mx-auto" />
+        <div className="w-16 h-16 rounded-2xl bg-red-950/40 border border-red-900/60 flex items-center justify-center mx-auto text-red-500">
+          <Shield className="w-8 h-8 text-red-500" />
+        </div>
         <h2 className="font-display text-2xl font-bold text-white">Administrator Access Required</h2>
         <p className="text-slate-400 text-sm">
-          You must be logged in as an administrator to access the Z1 Movies management console.
+          You must be authenticated with curator privileges to access the Z1 Movies administrative dashboard.
         </p>
-        <button
-          onClick={onNavigateHome}
-          className="px-5 py-2.5 bg-slate-800 text-white rounded-lg text-xs font-semibold hover:bg-slate-700"
-        >
-          Return to Home
-        </button>
+        <div className="flex items-center justify-center gap-3 pt-2">
+          {onOpenAuth && (
+            <button
+              onClick={onOpenAuth}
+              className="px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-red-950/50"
+            >
+              Sign In as Admin
+            </button>
+          )}
+          <button
+            onClick={onNavigateHome}
+            className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 transition-colors"
+          >
+            Return to Home
+          </button>
+        </div>
       </div>
     );
   }

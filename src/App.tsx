@@ -17,33 +17,67 @@ import { AdminPage } from './pages/AdminPage';
 import { ContactPage } from './pages/ContactPage';
 import { LegalPage } from './pages/LegalPage';
 
+const getTabFromPath = (path: string): string => {
+  const clean = path.toLowerCase().replace(/\/$/, '');
+  if (clean === '/admin') return 'admin';
+  if (clean === '/movies') return 'movies';
+  if (clean === '/genres') return 'genres';
+  if (clean === '/search') return 'search';
+  if (clean === '/watchlist') return 'watchlist';
+  if (clean === '/contact') return 'contact';
+  if (clean === '/legal/dmca' || clean === '/dmca') return 'legal_dmca';
+  if (clean === '/legal/terms' || clean === '/terms') return 'legal_terms';
+  if (clean === '/legal/privacy' || clean === '/privacy') return 'legal_privacy';
+  return 'home';
+};
+
 export default function App() {
-  const [currentTab, setCurrentTab] = useState<string>('home');
+  const [currentTab, setCurrentTab] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return getTabFromPath(window.location.pathname);
+    }
+    return 'home';
+  });
   const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null);
   const [playingMovie, setPlayingMovie] = useState<Movie | null>(null);
   const [user, setUser] = useState<User | null>(authStorage.getUser());
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [initialGenre, setInitialGenre] = useState<string>('Action');
 
-  // Verify auth on mount
+  // Verify auth on mount and ensure initial data
   useEffect(() => {
-    if (authStorage.getToken()) {
-      api.getMe()
-        .then((userData) => setUser(userData))
-        .catch(() => {
-          authStorage.clearToken();
-          setUser(null);
-        });
-    }
+    api.ensureInitialData();
+    api.getMe()
+      .then((userData) => {
+        if (userData) {
+          setUser(userData);
+        }
+      })
+      .catch(() => {});
   }, []);
 
-  // Scroll to top on navigation
+  // Listen for browser back / forward navigation
+  useEffect(() => {
+    const handlePopState = () => {
+      const tab = getTabFromPath(window.location.pathname);
+      setSelectedMovie(null);
+      setCurrentTab(tab);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Scroll to top on navigation & sync browser history
   const navigateTo = (tab: string, extra?: any) => {
     if (extra?.genre) {
       setInitialGenre(extra.genre);
     }
     setSelectedMovie(null);
     setCurrentTab(tab);
+    const path = tab === 'home' ? '/' : `/${tab.replace('_', '/')}`;
+    if (window.location.pathname !== path) {
+      window.history.pushState({ tab }, '', path);
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -59,9 +93,7 @@ export default function App() {
   const handleLogout = () => {
     api.logout();
     setUser(null);
-    if (currentTab === 'admin' || currentTab === 'watchlist') {
-      setCurrentTab('home');
-    }
+    navigateTo('home');
   };
 
   return (
@@ -132,6 +164,7 @@ export default function App() {
               <AdminPage
                 user={user}
                 onNavigateHome={() => navigateTo('home')}
+                onOpenAuth={() => setAuthModalOpen(true)}
                 onSelectMovie={handleSelectMovie}
                 onPlayMovie={handlePlayMovie}
               />
@@ -166,7 +199,12 @@ export default function App() {
       <AuthModal
         isOpen={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
-        onSuccess={(newUser) => setUser(newUser)}
+        onSuccess={(newUser) => {
+          setUser(newUser);
+          if (newUser.role === 'admin') {
+            navigateTo('admin');
+          }
+        }}
       />
 
       {/* Footer */}

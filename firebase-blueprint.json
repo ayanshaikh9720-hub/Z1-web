@@ -1,0 +1,166 @@
+{
+  "entities": {
+    "Movie": {
+      "title": "Movie",
+      "description": "A licensed film title in the catalog",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200, "description": "Movie title" },
+        "description": { "type": "string", "maxLength": 5000, "description": "Synopsis" },
+        "posterUrl": { "type": "string", "maxLength": 2048, "description": "Poster image URL" },
+        "backdropUrl": { "type": "string", "maxLength": 2048, "description": "Backdrop banner URL" },
+        "videoUrl": { "type": "string", "maxLength": 2048, "description": "Streaming video URL" },
+        "videoType": { "type": "string", "enum": ["mp4", "hls", "webm"], "description": "Stream type" },
+        "downloadUrls": {
+          "type": "string",
+          "description": "Serialized JSON array or list of authorized download quality options"
+        },
+        "releaseYear": { "type": "number", "description": "Year of release" },
+        "language": { "type": "string", "maxLength": 100, "description": "Audio language" },
+        "genres": { "type": "string", "description": "Comma separated genres or tags" },
+        "duration": { "type": "number", "description": "Duration in minutes" },
+        "cast": { "type": "string", "maxLength": 1000, "description": "Cast members" },
+        "director": { "type": "string", "maxLength": 200, "description": "Director name" },
+        "rating": { "type": "number", "description": "Critic or community rating" },
+        "featured": { "type": "boolean", "description": "Featured on home billboard" },
+        "trending": { "type": "boolean", "description": "Trending status" },
+        "published": { "type": "boolean", "description": "Publicly published" },
+        "views": { "type": "number", "description": "Total view count" },
+        "downloads": { "type": "number", "description": "Total download count" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Update timestamp" }
+      },
+      "required": ["title", "videoUrl", "published"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile and role document",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "maxLength": 254, "description": "Email address" },
+        "name": { "type": "string", "maxLength": 100, "description": "Display name" },
+        "role": { "type": "string", "enum": ["admin", "user"], "description": "Role in the system" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
+      },
+      "required": ["id", "email", "role"]
+    },
+    "WatchlistItem": {
+      "title": "WatchlistItem",
+      "description": "User saved movie in watchlist",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "User UID" },
+        "movieId": { "type": "string", "description": "Movie ID" },
+        "addedAt": { "type": "string", "format": "date-time", "description": "Added timestamp" }
+      },
+      "required": ["userId", "movieId"]
+    },
+    "PlaybackProgress": {
+      "title": "PlaybackProgress",
+      "description": "User playback position and progress tracking",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "User UID" },
+        "movieId": { "type": "string", "description": "Movie ID" },
+        "position": { "type": "number", "description": "Playback position in seconds" },
+        "duration": { "type": "number", "description": "Total duration in seconds" },
+        "percentage": { "type": "number", "description": "Playback percentage" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last updated" }
+      },
+      "required": ["userId", "movieId", "position", "duration"]
+    },
+    "ViewRecord": {
+      "title": "ViewRecord",
+      "description": "View tracking event for analytics",
+      "type": "object",
+      "properties": {
+        "movieId": { "type": "string", "description": "Movie ID" },
+        "userId": { "type": "string", "description": "User UID or anonymous identifier" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Event timestamp" }
+      },
+      "required": ["movieId"]
+    },
+    "DownloadRecord": {
+      "title": "DownloadRecord",
+      "description": "Download tracking event",
+      "type": "object",
+      "properties": {
+        "movieId": { "type": "string", "description": "Movie ID" },
+        "quality": { "type": "string", "description": "Quality e.g. 1080p" },
+        "userId": { "type": "string", "description": "User UID or anonymous" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Timestamp" }
+      },
+      "required": ["movieId", "quality"]
+    },
+    "ContactRecord": {
+      "title": "ContactRecord",
+      "description": "User inquiry or DMCA contact submission",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100, "description": "Sender name" },
+        "email": { "type": "string", "maxLength": 254, "description": "Sender email" },
+        "subject": { "type": "string", "maxLength": 200, "description": "Message subject" },
+        "message": { "type": "string", "maxLength": 5000, "description": "Message body" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Submission timestamp" }
+      },
+      "required": ["name", "email", "subject", "message"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Designated administrator identity record",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "description": "Admin email" },
+        "role": { "type": "string", "description": "Admin role indicator" }
+      },
+      "required": ["email"]
+    },
+    "TestRecord": {
+      "title": "TestRecord",
+      "description": "Connection test probe document",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "description": "Probe status" }
+      }
+    }
+  },
+  "firestore": {
+    "/movies/{movieId}": {
+      "schema": "Movie",
+      "description": "Movie catalog items"
+    },
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile documents"
+    },
+    "/watchlists/{watchlistId}": {
+      "schema": "WatchlistItem",
+      "description": "User watchlist items"
+    },
+    "/progress/{progressId}": {
+      "schema": "PlaybackProgress",
+      "description": "User playback progress records"
+    },
+    "/views/{viewId}": {
+      "schema": "ViewRecord",
+      "description": "Playback view analytics logs"
+    },
+    "/downloads/{downloadId}": {
+      "schema": "DownloadRecord",
+      "description": "Download event analytics logs"
+    },
+    "/contacts/{contactId}": {
+      "schema": "ContactRecord",
+      "description": "User message submissions"
+    },
+    "/admins/{adminId}": {
+      "schema": "AdminRecord",
+      "description": "Trusted administrator identities"
+    },
+    "/test/{docId}": {
+      "schema": "TestRecord",
+      "description": "Connection health test probe path"
+    }
+  }
+}
