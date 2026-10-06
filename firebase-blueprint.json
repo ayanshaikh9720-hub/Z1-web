@@ -15,6 +15,14 @@
           "type": "string",
           "description": "Serialized JSON array or list of authorized download quality options"
         },
+        "audioTracks": {
+          "type": "string",
+          "description": "Array of available audio tracks with languages and URLs"
+        },
+        "subtitleTracks": {
+          "type": "string",
+          "description": "Array of available subtitle tracks with languages and URLs"
+        },
         "releaseYear": { "type": "number", "description": "Year of release" },
         "language": { "type": "string", "maxLength": 100, "description": "Audio language" },
         "genres": { "type": "string", "description": "Comma separated genres or tags" },

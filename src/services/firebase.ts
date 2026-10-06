@@ -143,6 +143,32 @@ export const SEED_MOVIES: Omit<Movie, 'id'>[] = [
     published: true,
     views: 1420,
     downloads: 384,
+    audioTracks: [
+      {
+        id: 'tos_en',
+        language: 'English',
+        label: 'English [Original Audio]',
+        url: 'https://archive.org/download/Tears-of-Steel/tears_of_steel_720p.mp4',
+        isDefault: true,
+      },
+    ],
+    subtitleTracks: [
+      {
+        id: 'tos_sub_en',
+        language: 'English',
+        label: 'English [CC]',
+        src: 'data:text/vtt;charset=utf-8,WEBVTT%0A%0A00:00:01.000%20--%3E%2000:00:04.000%0AExplore%20the%20future%20of%20Amsterdam.%0A%0A00:00:05.000%20--%3E%2000:00:08.000%0AAmsterdam,%20Old%20Church,%20the%20distant%20future.',
+        format: 'vtt',
+        isDefault: true,
+      },
+      {
+        id: 'tos_sub_hi',
+        language: 'Hindi',
+        label: 'Hindi (हिंदी)',
+        src: 'data:text/vtt;charset=utf-8,WEBVTT%0A%0A00:00:01.000%20--%3E%2000:00:04.000%0A%E0%A4%AD%E0%A4%B5%E0%A4%BF%E0%A4%B7%E0%A5%8D%E0%A4%AF%20%E0%A4%95%E0%A5%87%20%E0%A4%8F%E0%A4%AE%E0%A5%8D%E0%A4%B8%E0%A5%8D%E0%A4%9F%E0%A4%B0%E0%A4%A1%E0%A4%AE%20%E0%A4%95%E0%A5%80%20%E0%A4%96%E0%A5%8B%E0%A4%9C%20%E0%A4%95%E0%A4%B0%E0%A5%87%E0%A4%82%E0%A5%A4%0A%0A00:00:05.000%20--%3E%2000:00:08.000%0A%E0%A4%8F%E0%A4%AE%E0%A5%8D%E0%A4%B8%E0%A5%8D%E0%A4%9F%E0%A4%B0%E0%A4%A1%E0%A4%AE,%20%E0%A4%AA%E0%A5%81%E0%A4%B0%E0%A4%BE%E0%A4%A8%E0%A4%BE%20%E0%A4%9A%E0%A4%B0%E0%A5%8D%E0%A4%9A,%20%E0%A4%B8%E0%A5%81%E0%A4%A6%E0%A5%82%E0%A4%B0%20%E0%A4%AD%E0%A4%B5%E0%A4%BF%E0%A4%B7%E0%A5%8D%E0%A4%AF%E0%A5%A4',
+        format: 'vtt',
+      },
+    ],
     createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
     updatedAt: new Date().toISOString(),
   },
@@ -335,6 +361,8 @@ function docToMovie(docSnap: any): Movie {
     videoUrl: data.videoUrl || '',
     videoType: data.videoType || 'mp4',
     downloadUrls: Array.isArray(data.downloadUrls) ? data.downloadUrls : [],
+    audioTracks: Array.isArray(data.audioTracks) ? data.audioTracks : [],
+    subtitleTracks: Array.isArray(data.subtitleTracks) ? data.subtitleTracks : [],
     releaseYear: data.releaseYear || new Date().getFullYear(),
     language: data.language || 'English',
     genres: Array.isArray(data.genres) ? data.genres : (data.genres ? data.genres.split(',') : []),
@@ -540,6 +568,8 @@ export const firebaseApi = {
       videoUrl: movieData.videoUrl || '',
       videoType: movieData.videoType || 'mp4',
       downloadUrls: movieData.downloadUrls || [],
+      audioTracks: movieData.audioTracks || [],
+      subtitleTracks: movieData.subtitleTracks || [],
       releaseYear: movieData.releaseYear || new Date().getFullYear(),
       language: movieData.language || 'English',
       genres: movieData.genres || ['Action'],
@@ -568,9 +598,21 @@ export const firebaseApi = {
       updatedAt: new Date().toISOString(),
     };
     delete (updatePayload as any).id;
-    await updateDoc(docRef, updatePayload);
-    const snap = await getDoc(docRef);
-    return docToMovie(snap);
+    try {
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        await updateDoc(docRef, updatePayload);
+      } else {
+        await setDoc(docRef, updatePayload, { merge: true });
+      }
+    } catch {
+      await setDoc(docRef, updatePayload, { merge: true });
+    }
+    const freshSnap = await getDoc(docRef);
+    if (freshSnap.exists()) {
+      return docToMovie(freshSnap);
+    }
+    return { ...movieData, id, updatedAt: updatePayload.updatedAt } as Movie;
   },
 
   // 6. Admin: Delete Movie

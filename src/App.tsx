@@ -90,6 +90,15 @@ export default function App() {
     setPlayingMovie(movie);
   };
 
+  const handleMovieUpdated = (updatedMovie: Movie) => {
+    if (selectedMovie && selectedMovie.id === updatedMovie.id) {
+      setSelectedMovie(updatedMovie);
+    }
+    if (playingMovie && playingMovie.id === updatedMovie.id) {
+      setPlayingMovie(updatedMovie);
+    }
+  };
+
   const handleLogout = () => {
     api.logout();
     setUser(null);
@@ -167,6 +176,7 @@ export default function App() {
                 onOpenAuth={() => setAuthModalOpen(true)}
                 onSelectMovie={handleSelectMovie}
                 onPlayMovie={handlePlayMovie}
+                onMovieUpdated={handleMovieUpdated}
               />
             )}
 

@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { Movie, AdminStats, DownloadOption, User } from '../types';
 import { api } from '../services/api';
+import { EditMovieModal } from '../components/EditMovieModal';
 
 interface AdminPageProps {
   user: User | null;
@@ -13,6 +14,7 @@ interface AdminPageProps {
   onOpenAuth?: () => void;
   onSelectMovie: (movie: Movie) => void;
   onPlayMovie: (movie: Movie) => void;
+  onMovieUpdated?: (movie: Movie) => void;
 }
 
 export const AdminPage: React.FC<AdminPageProps> = ({
@@ -21,6 +23,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
   onOpenAuth,
   onSelectMovie,
   onPlayMovie,
+  onMovieUpdated,
 }) => {
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [movies, setMovies] = useState<Movie[]>([]);
@@ -28,9 +31,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({
   const [filterStatus, setFilterStatus] = useState<'all' | 'published' | 'unpublished' | 'featured' | 'trending'>('all');
   const [sortField, setSortField] = useState<'newest' | 'views' | 'downloads'>('newest');
 
-  // Modal states
+  // Dedicated Edit Movie modal state
   const [editModalOpen, setEditModalOpen] = useState<boolean>(false);
-  const [currentEditMovie, setCurrentEditMovie] = useState<Partial<Movie> | null>(null);
+  const [movieToEdit, setMovieToEdit] = useState<Movie | null>(null);
+
+  // Add New Movie modal state
+  const [newMovieModalOpen, setNewMovieModalOpen] = useState<boolean>(false);
+  const [currentNewMovie, setCurrentNewMovie] = useState<Partial<Movie> | null>(null);
   const [formSaving, setFormSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string>('');
 
@@ -70,6 +77,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({
       setMovies((prev) => prev.map((m) => (m.id === movie.id ? updated.movie : m)));
       // Refresh stats
       api.getAdminStats().then(setStats).catch(() => {});
+      if (onMovieUpdated) {
+        onMovieUpdated(updated.movie);
+      }
     } catch (err: any) {
       alert(`Publish toggle failed: ${err.message}`);
     }
@@ -86,8 +96,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     }
   };
 
+  // Open Edit Movie Modal for existing movie
+  const handleOpenEditModal = (movie: Movie) => {
+    setMovieToEdit(movie);
+    setEditModalOpen(true);
+  };
+
+  // Save Edited Movie Callback
+  const handleSaveEditedMovie = async (updated: Movie) => {
+    const res = await api.updateMovie(updated.id, updated);
+    setMovies((prev) => prev.map((m) => (m.id === res.movie.id ? res.movie : m)));
+    api.getAdminStats().then(setStats).catch(() => {});
+    if (onMovieUpdated) {
+      onMovieUpdated(res.movie);
+    }
+  };
+
   const openNewMovieModal = () => {
-    setCurrentEditMovie({
+    setCurrentNewMovie({
       title: '',
       description: '',
       posterUrl: '/src/assets/images/poster_stellar_voyage_1790644925651.jpg',
@@ -118,19 +144,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     setProbeResult(null);
     setUploadSuccess('');
     setUploadError('');
-    setEditModalOpen(true);
+    setNewMovieModalOpen(true);
   };
 
-  const openEditModal = (movie: Movie) => {
-    setCurrentEditMovie({ ...movie });
-    setFormError('');
-    setProbeResult(null);
-    setUploadSuccess('');
-    setUploadError('');
-    setEditModalOpen(true);
-  };
-
-  // Video Upload Handler
+  // Video Upload Handler for New Movies
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -143,14 +160,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     try {
       const res = await api.uploadFile(file, (pct) => setUploadProgress(pct));
       setUploadSuccess(`Upload complete: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB)`);
-      if (currentEditMovie) {
-        setCurrentEditMovie({
-          ...currentEditMovie,
+      if (currentNewMovie) {
+        setCurrentNewMovie({
+          ...currentNewMovie,
           videoUrl: res.url,
           videoType: res.url.endsWith('.m3u8') ? 'hls' : 'mp4',
         });
       }
-      // Run automatic probe verification on newly uploaded local file
       verifyVideoUrl(res.url);
     } catch (err: any) {
       setUploadError(err.message || 'File upload failed');
@@ -161,7 +177,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
 
   // Probe and Verify Video Stream
   const verifyVideoUrl = async (urlToTest?: string) => {
-    const testUrl = urlToTest || currentEditMovie?.videoUrl;
+    const testUrl = urlToTest || currentNewMovie?.videoUrl;
     if (!testUrl) {
       setProbeResult({ valid: false, message: 'Please enter a video URL first' });
       return;
@@ -186,10 +202,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     }
   };
 
-  // Form Save
-  const handleSaveMovie = async (e: React.FormEvent) => {
+  // Form Save for New Movies
+  const handleSaveNewMovie = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentEditMovie || !currentEditMovie.title || !currentEditMovie.videoUrl) {
+    if (!currentNewMovie || !currentNewMovie.title || !currentNewMovie.videoUrl) {
       setFormError('Title and Video URL are required fields.');
       return;
     }
@@ -198,16 +214,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     setFormError('');
 
     try {
-      if (currentEditMovie.id) {
-        // Update
-        const res = await api.updateMovie(currentEditMovie.id, currentEditMovie);
-        setMovies((prev) => prev.map((m) => (m.id === res.movie.id ? res.movie : m)));
-      } else {
-        // Create
-        const res = await api.createMovie(currentEditMovie);
-        setMovies((prev) => [res.movie, ...prev]);
-      }
-      setEditModalOpen(false);
+      const res = await api.createMovie(currentNewMovie);
+      setMovies((prev) => [res.movie, ...prev]);
+      setNewMovieModalOpen(false);
       api.getAdminStats().then(setStats).catch(() => {});
     } catch (err: any) {
       setFormError(err.message || 'Failed to save movie record.');
@@ -483,7 +492,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                     </td>
 
                     <td className="py-3 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
+                      <div className="flex items-center justify-end gap-2">
                         <button
                           onClick={() => onPlayMovie(movie)}
                           className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-300 hover:text-white transition-colors"
@@ -492,11 +501,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                           <Play className="w-3.5 h-3.5 fill-current" />
                         </button>
                         <button
-                          onClick={() => openEditModal(movie)}
-                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-                          title="Edit Movie"
+                          onClick={() => handleOpenEditModal(movie)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-750 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 hover:border-slate-600 transition-colors shadow-sm"
+                          title="Edit Movie Metadata & Thumbnail"
                         >
-                          <Edit2 className="w-3.5 h-3.5" />
+                          <Edit2 className="w-3.5 h-3.5 text-red-400" />
+                          <span>Edit</span>
                         </button>
                         <button
                           onClick={() => handleDeleteMovie(movie.id, movie.title)}
@@ -515,21 +525,34 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         </div>
       </div>
 
-      {/* Add / Edit Movie Modal with Video Upload & Probe */}
-      {editModalOpen && currentEditMovie && (
+      {/* Dedicated Edit Movie Modal */}
+      {editModalOpen && movieToEdit && (
+        <EditMovieModal
+          movie={movieToEdit}
+          isOpen={editModalOpen}
+          onClose={() => {
+            setEditModalOpen(false);
+            setMovieToEdit(null);
+          }}
+          onSave={handleSaveEditedMovie}
+        />
+      )}
+
+      {/* Add New Movie Modal with Video Upload & Probe */}
+      {newMovieModalOpen && currentNewMovie && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm overflow-y-auto">
           <div className="relative w-full max-w-3xl bg-[#0e111a] border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 my-8 text-slate-100 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-4 border-b border-slate-800 mb-6">
               <div>
                 <h3 className="font-display text-xl font-bold text-white">
-                  {currentEditMovie.id ? 'Edit Movie Details' : 'Add New Licensed Movie'}
+                  Add New Licensed Movie
                 </h3>
                 <p className="text-xs text-slate-400">
                   Configure streaming source, authorized download resolutions, and metadata
                 </p>
               </div>
               <button
-                onClick={() => setEditModalOpen(false)}
+                onClick={() => setNewMovieModalOpen(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-lg"
               >
                 ✕
@@ -543,7 +566,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
               </div>
             )}
 
-            <form onSubmit={handleSaveMovie} className="space-y-6">
+            <form onSubmit={handleSaveNewMovie} className="space-y-6">
               {/* Basic Info */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
@@ -551,8 +574,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <input
                     type="text"
                     required
-                    value={currentEditMovie.title || ''}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, title: e.target.value })}
+                    value={currentNewMovie.title || ''}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, title: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
                     placeholder="Title of authorized film"
                   />
@@ -562,8 +585,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Description / Synopsis</label>
                   <textarea
                     rows={3}
-                    value={currentEditMovie.description || ''}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, description: e.target.value })}
+                    value={currentNewMovie.description || ''}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, description: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
                     placeholder="Compelling synopsis..."
                   />
@@ -573,8 +596,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Release Year</label>
                   <input
                     type="number"
-                    value={currentEditMovie.releaseYear || 2025}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, releaseYear: parseInt(e.target.value, 10) })}
+                    value={currentNewMovie.releaseYear || 2025}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, releaseYear: parseInt(e.target.value, 10) })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
                   />
                 </div>
@@ -583,8 +606,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Language</label>
                   <input
                     type="text"
-                    value={currentEditMovie.language || 'English'}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, language: e.target.value })}
+                    value={currentNewMovie.language || 'English'}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, language: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
                     placeholder="e.g. English, Hindi, Tamil"
                   />
@@ -594,8 +617,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Duration (minutes)</label>
                   <input
                     type="number"
-                    value={currentEditMovie.duration || 90}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, duration: parseInt(e.target.value, 10) })}
+                    value={currentNewMovie.duration || 90}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, duration: parseInt(e.target.value, 10) })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
                   />
                 </div>
@@ -607,8 +630,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                     step="0.1"
                     min="0"
                     max="10"
-                    value={currentEditMovie.rating || ''}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, rating: e.target.value ? parseFloat(e.target.value) : undefined })}
+                    value={currentNewMovie.rating || ''}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, rating: e.target.value ? parseFloat(e.target.value) : undefined })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
                     placeholder="Leave empty if unrated"
                   />
@@ -618,8 +641,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Director</label>
                   <input
                     type="text"
-                    value={currentEditMovie.director || ''}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, director: e.target.value })}
+                    value={currentNewMovie.director || ''}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, director: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
                   />
                 </div>
@@ -628,9 +651,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Cast (Comma separated)</label>
                   <input
                     type="text"
-                    value={Array.isArray(currentEditMovie.cast) ? currentEditMovie.cast.join(', ') : ''}
-                    onChange={(e) => setCurrentEditMovie({
-                      ...currentEditMovie,
+                    value={Array.isArray(currentNewMovie.cast) ? currentNewMovie.cast.join(', ') : ''}
+                    onChange={(e) => setCurrentNewMovie({
+                      ...currentNewMovie,
                       cast: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
                     })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
@@ -642,9 +665,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Genres (Comma separated)</label>
                   <input
                     type="text"
-                    value={Array.isArray(currentEditMovie.genres) ? currentEditMovie.genres.join(', ') : ''}
-                    onChange={(e) => setCurrentEditMovie({
-                      ...currentEditMovie,
+                    value={Array.isArray(currentNewMovie.genres) ? currentNewMovie.genres.join(', ') : ''}
+                    onChange={(e) => setCurrentNewMovie({
+                      ...currentNewMovie,
                       genres: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
                     })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
@@ -715,8 +738,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                     <input
                       type="text"
                       required
-                      value={currentEditMovie.videoUrl || ''}
-                      onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, videoUrl: e.target.value })}
+                      value={currentNewMovie.videoUrl || ''}
+                      onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, videoUrl: e.target.value })}
                       placeholder="https://.../video.mp4 or /uploads/..."
                       className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono"
                     />
@@ -725,8 +748,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1">Stream Format</label>
                     <select
-                      value={currentEditMovie.videoType || 'mp4'}
-                      onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, videoType: e.target.value as any })}
+                      value={currentNewMovie.videoType || 'mp4'}
+                      onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, videoType: e.target.value as any })}
                       className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs"
                     >
                       <option value="mp4">MP4 (Standard)</option>
@@ -736,12 +759,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   </div>
                 </div>
 
-                {/* Probe & Verification Action (Avoids the "thumbnail showed but did not play" issue!) */}
+                {/* Probe & Verification Action */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1 border-t border-slate-800">
                   <button
                     type="button"
                     onClick={() => verifyVideoUrl()}
-                    disabled={probeLoading || !currentEditMovie.videoUrl}
+                    disabled={probeLoading || !currentNewMovie.videoUrl}
                     className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700"
                   >
                     {probeLoading ? (
@@ -771,17 +794,17 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      const list = currentEditMovie.downloadUrls || [];
-                      setCurrentEditMovie({
-                        ...currentEditMovie,
+                      const list = currentNewMovie.downloadUrls || [];
+                      setCurrentNewMovie({
+                        ...currentNewMovie,
                         downloadUrls: [
                           ...list,
                           {
                             quality: '720p',
                             format: 'MP4',
-                            url: currentEditMovie.videoUrl || '',
+                            url: currentNewMovie.videoUrl || '',
                             fileSize: '700 MB',
-                            language: currentEditMovie.language || 'English',
+                            language: currentNewMovie.language || 'English',
                           },
                         ],
                       });
@@ -793,19 +816,19 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 </div>
 
                 <p className="text-[11px] text-slate-400">
-                  Leave empty if no offline download rights are granted (Download button will show "Download unavailable").
+                  Leave empty if no offline download rights are granted.
                 </p>
 
-                {currentEditMovie.downloadUrls?.map((opt, idx) => (
+                {currentNewMovie.downloadUrls?.map((opt, idx) => (
                   <div key={idx} className="grid grid-cols-1 sm:grid-cols-5 gap-2 p-2.5 bg-black/40 rounded-lg border border-slate-800 items-end">
                     <div>
                       <label className="text-[10px] text-slate-400 block mb-1">Quality</label>
                       <select
                         value={opt.quality}
                         onChange={(e) => {
-                          const updated = [...(currentEditMovie.downloadUrls || [])];
+                          const updated = [...(currentNewMovie.downloadUrls || [])];
                           updated[idx].quality = e.target.value as any;
-                          setCurrentEditMovie({ ...currentEditMovie, downloadUrls: updated });
+                          setCurrentNewMovie({ ...currentNewMovie, downloadUrls: updated });
                         }}
                         className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs"
                       >
@@ -822,9 +845,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                         type="text"
                         value={opt.url}
                         onChange={(e) => {
-                          const updated = [...(currentEditMovie.downloadUrls || [])];
+                          const updated = [...(currentNewMovie.downloadUrls || [])];
                           updated[idx].url = e.target.value;
-                          setCurrentEditMovie({ ...currentEditMovie, downloadUrls: updated });
+                          setCurrentNewMovie({ ...currentNewMovie, downloadUrls: updated });
                         }}
                         className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono"
                         placeholder="Direct authorized file URL"
@@ -837,9 +860,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                         type="text"
                         value={opt.fileSize || ''}
                         onChange={(e) => {
-                          const updated = [...(currentEditMovie.downloadUrls || [])];
+                          const updated = [...(currentNewMovie.downloadUrls || [])];
                           updated[idx].fileSize = e.target.value;
-                          setCurrentEditMovie({ ...currentEditMovie, downloadUrls: updated });
+                          setCurrentNewMovie({ ...currentNewMovie, downloadUrls: updated });
                         }}
                         className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs"
                         placeholder="e.g. 1.2 GB"
@@ -850,8 +873,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                       <button
                         type="button"
                         onClick={() => {
-                          const updated = (currentEditMovie.downloadUrls || []).filter((_, i) => i !== idx);
-                          setCurrentEditMovie({ ...currentEditMovie, downloadUrls: updated });
+                          const updated = (currentNewMovie.downloadUrls || []).filter((_, i) => i !== idx);
+                          setCurrentNewMovie({ ...currentNewMovie, downloadUrls: updated });
                         }}
                         className="w-full py-1 bg-red-950/60 text-red-300 hover:bg-red-900 rounded text-xs transition-colors"
                       >
@@ -867,8 +890,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={Boolean(currentEditMovie.published)}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, published: e.target.checked })}
+                    checked={Boolean(currentNewMovie.published)}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, published: e.target.checked })}
                     className="accent-red-600 rounded"
                   />
                   <span className="font-semibold text-slate-200">Published (Visible to public)</span>
@@ -877,8 +900,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={Boolean(currentEditMovie.featured)}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, featured: e.target.checked })}
+                    checked={Boolean(currentNewMovie.featured)}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, featured: e.target.checked })}
                     className="accent-red-600 rounded"
                   />
                   <span className="font-semibold text-slate-200">Featured in Hero</span>
@@ -887,8 +910,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={Boolean(currentEditMovie.trending)}
-                    onChange={(e) => setCurrentEditMovie({ ...currentEditMovie, trending: e.target.checked })}
+                    checked={Boolean(currentNewMovie.trending)}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, trending: e.target.checked })}
                     className="accent-red-600 rounded"
                   />
                   <span className="font-semibold text-slate-200">Trending Section</span>
@@ -899,7 +922,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setEditModalOpen(false)}
+                  onClick={() => setNewMovieModalOpen(false)}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg"
                 >
                   Cancel

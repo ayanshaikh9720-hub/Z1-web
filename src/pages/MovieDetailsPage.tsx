@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, Play, Download, Bookmark, Check, Star, ShieldCheck, Film, AlertCircle, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Play, Download, Bookmark, Check, Star, ShieldCheck, Film, AlertCircle, ExternalLink, Languages, Volume2, Subtitles } from 'lucide-react';
 import { Movie, User, DownloadOption } from '../types';
 import { api } from '../services/api';
 import { AdBanner } from '../components/AdBanner';
@@ -274,6 +274,75 @@ export const MovieDetailsPage: React.FC<MovieDetailsPageProps> = ({
                 <span className="text-sm text-slate-200 font-medium">
                   {movie.cast && movie.cast.length > 0 ? movie.cast.join(', ') : 'Original Voice Ensemble'}
                 </span>
+              </div>
+            </div>
+
+            {/* Multilingual OTT Audio & Subtitle Languages */}
+            <div className="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Languages className="w-4 h-4 text-red-500" />
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">
+                    Audio & Subtitles Available
+                  </span>
+                </div>
+                {((movie.audioTracks && movie.audioTracks.length > 0) || (movie.subtitleTracks && movie.subtitleTracks.length > 0)) && (
+                  <span className="text-[10px] font-bold text-red-400 bg-red-950/60 border border-red-900/60 px-2 py-0.5 rounded-full">
+                    Multilingual
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 text-xs">
+                {/* Audio Languages */}
+                <div className="space-y-1">
+                  <span className="text-slate-400 flex items-center gap-1 font-semibold text-[11px]">
+                    <Volume2 className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Audio Tracks:</span>
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-medium text-[11px] border border-slate-700">
+                      {movie.language || 'English'} [Original]
+                    </span>
+                    {movie.audioTracks &&
+                      movie.audioTracks
+                        .filter((t) => t.id !== 'original' && t.language && t.url)
+                        .map((track) => (
+                          <span
+                            key={track.id}
+                            className="px-2 py-0.5 rounded bg-red-950/40 text-red-300 font-medium text-[11px] border border-red-900/40"
+                          >
+                            {track.label || track.language}
+                          </span>
+                        ))}
+                  </div>
+                </div>
+
+                {/* Subtitle Languages */}
+                <div className="space-y-1">
+                  <span className="text-slate-400 flex items-center gap-1 font-semibold text-[11px]">
+                    <Subtitles className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Subtitles / CC:</span>
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {movie.subtitleTracks && movie.subtitleTracks.length > 0 ? (
+                      movie.subtitleTracks
+                        .filter((s) => s.language && s.src)
+                        .map((sub) => (
+                          <span
+                            key={sub.id}
+                            className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-medium text-[11px] border border-slate-700"
+                          >
+                            {sub.label || sub.language}
+                          </span>
+                        ))
+                    ) : (
+                      <span className="text-slate-500 italic text-[11px]">
+                        None available
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 

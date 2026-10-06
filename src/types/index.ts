@@ -6,6 +6,23 @@ export interface DownloadOption {
   language?: string;
 }
 
+export interface AudioTrack {
+  id: string;
+  language: string;
+  label: string;
+  url: string;
+  isDefault?: boolean;
+}
+
+export interface SubtitleTrack {
+  id: string;
+  language: string;
+  label: string;
+  src: string;
+  format?: 'vtt' | 'srt';
+  isDefault?: boolean;
+}
+
 export interface Movie {
   id: string;
   title: string;
@@ -15,6 +32,8 @@ export interface Movie {
   videoUrl: string;
   videoType: 'mp4' | 'hls' | 'webm';
   downloadUrls: DownloadOption[];
+  audioTracks?: AudioTrack[];
+  subtitleTracks?: SubtitleTrack[];
   releaseYear: number;
   language: string;
   genres: string[];
