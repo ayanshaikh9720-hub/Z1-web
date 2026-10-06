@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Film, Users, Eye, Download, Plus, Edit2, Trash2, CheckCircle2, XCircle,
   AlertTriangle, UploadCloud, RefreshCw, Star, Flame, Check, ExternalLink,
-  Shield, Filter, ArrowUpDown, Play
+  Shield, Filter, ArrowUpDown, Play, Image as ImageIcon
 } from 'lucide-react';
 import { Movie, AdminStats, DownloadOption, User } from '../types';
 import { api } from '../services/api';
@@ -41,7 +41,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({
   const [formSaving, setFormSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string>('');
 
-  // Upload states
+  // Thumbnail upload states for Add New Movie
+  const [thumbnailUploading, setThumbnailUploading] = useState<boolean>(false);
+  const [thumbnailUploadProgress, setThumbnailUploadProgress] = useState<number>(0);
+  const [thumbnailUploadSuccess, setThumbnailUploadSuccess] = useState<string>('');
+  const [thumbnailUploadError, setThumbnailUploadError] = useState<string>('');
+  const thumbnailFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Video Upload states
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [uploadSuccess, setUploadSuccess] = useState<string>('');
@@ -116,8 +123,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     setCurrentNewMovie({
       title: '',
       description: '',
-      posterUrl: '/src/assets/images/poster_stellar_voyage_1790644925651.jpg',
-      backdropUrl: '/src/assets/images/hero_cinema_backdrop_1790644911552.jpg',
+      posterUrl: '', // REQUIRED: Must be uploaded or selected
+      backdropUrl: '',
       videoUrl: '',
       videoType: 'mp4',
       downloadUrls: [
@@ -144,7 +151,57 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     setProbeResult(null);
     setUploadSuccess('');
     setUploadError('');
+    setThumbnailUploading(false);
+    setThumbnailUploadProgress(0);
+    setThumbnailUploadSuccess('');
+    setThumbnailUploadError('');
     setNewMovieModalOpen(true);
+  };
+
+  // Thumbnail Upload Handler for Add New Movie (Firebase Storage)
+  const handleThumbnailUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate image format (JPG, JPEG, PNG, WebP)
+    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+    if (!validTypes.includes(file.type.toLowerCase())) {
+      setThumbnailUploadError('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
+      return;
+    }
+
+    // Validate size (10 MB)
+    if (file.size > 10 * 1024 * 1024) {
+      setThumbnailUploadError('Image file is too large. Maximum allowed size is 10 MB.');
+      return;
+    }
+
+    setThumbnailUploading(true);
+    setThumbnailUploadProgress(0);
+    setThumbnailUploadError('');
+    setThumbnailUploadSuccess('');
+
+    try {
+      const url = await api.uploadThumbnail(file, (pct) => {
+        setThumbnailUploadProgress(pct);
+      });
+
+      if (currentNewMovie) {
+        setCurrentNewMovie({
+          ...currentNewMovie,
+          posterUrl: url,
+          backdropUrl: currentNewMovie.backdropUrl || url,
+        });
+      }
+      setThumbnailUploadSuccess(`Thumbnail uploaded successfully: ${file.name}`);
+    } catch (err: any) {
+      setThumbnailUploadError(err.message || 'Thumbnail upload failed');
+    } finally {
+      setThumbnailUploading(false);
+      if (thumbnailFileInputRef.current) {
+        thumbnailFileInputRef.current.value = '';
+      }
+    }
   };
 
   // Video Upload Handler for New Movies
@@ -210,11 +267,21 @@ export const AdminPage: React.FC<AdminPageProps> = ({
       return;
     }
 
+    if (!currentNewMovie.posterUrl || !currentNewMovie.posterUrl.trim()) {
+      setFormError('Movie Thumbnail / Poster is required. Please upload a poster before publishing.');
+      return;
+    }
+
     setFormSaving(true);
     setFormError('');
 
     try {
-      const res = await api.createMovie(currentNewMovie);
+      const moviePayload: Partial<Movie> = {
+        ...currentNewMovie,
+        backdropUrl: currentNewMovie.backdropUrl || currentNewMovie.posterUrl,
+      };
+
+      const res = await api.createMovie(moviePayload);
       setMovies((prev) => [res.movie, ...prev]);
       setNewMovieModalOpen(false);
       api.getAdminStats().then(setStats).catch(() => {});
@@ -673,6 +740,181 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
                     placeholder="Action, Thriller, Sci-Fi"
                   />
+                </div>
+              </div>
+
+              {/* REQUIRED MOVIE THUMBNAIL / POSTER UPLOAD SECTION */}
+              <div className="p-5 bg-slate-900/90 border border-slate-800 rounded-2xl space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                  <div>
+                    <h4 className="font-bold text-sm text-white flex items-center gap-2">
+                      <ImageIcon className="w-4 h-4 text-red-500" />
+                      <span>Movie Thumbnail / Poster</span>
+                      <span className="text-red-500 text-xs font-semibold">* Required</span>
+                    </h4>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Upload a poster image. It will be uploaded to Firebase Storage and displayed across Home, Catalog, and Search cards.
+                    </p>
+                  </div>
+                  {currentNewMovie.posterUrl ? (
+                    <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-950/70 border border-emerald-800/80 px-2.5 py-1 rounded-full flex items-center gap-1 self-start sm:self-auto">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Thumbnail Ready</span>
+                    </span>
+                  ) : (
+                    <span className="text-[11px] font-semibold text-amber-400 bg-amber-950/60 border border-amber-800/80 px-2.5 py-1 rounded-full flex items-center gap-1 self-start sm:self-auto">
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      <span>Required to publish</span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-5 items-center">
+                  {/* Large 2:3 Poster Preview Frame */}
+                  <div className="sm:col-span-4 flex flex-col items-center">
+                    <div className="relative w-44 h-64 rounded-xl overflow-hidden bg-black/60 border-2 border-dashed border-slate-700 shadow-xl flex flex-col items-center justify-center text-center p-3 group">
+                      {currentNewMovie.posterUrl ? (
+                        <>
+                          <img
+                            src={currentNewMovie.posterUrl}
+                            alt="Selected Movie Poster Preview"
+                            className="w-full h-full object-cover rounded-lg"
+                            referrerPolicy="no-referrer"
+                          />
+                          <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2 p-2">
+                            <button
+                              type="button"
+                              onClick={() => thumbnailFileInputRef.current?.click()}
+                              className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-lg shadow-md"
+                            >
+                              Change Poster
+                            </button>
+                            <span className="text-[10px] text-slate-300">Click to change</span>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center text-slate-500 space-y-2 p-2">
+                          <div className="w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-400">
+                            <ImageIcon className="w-6 h-6 text-red-500/80" />
+                          </div>
+                          <span className="text-xs font-bold text-slate-300">No Poster Uploaded</span>
+                          <span className="text-[10px] text-slate-500 leading-tight">
+                            Poster preview will appear here before publishing
+                          </span>
+                        </div>
+                      )}
+
+                      {thumbnailUploading && (
+                        <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-3 text-center z-10">
+                          <div className="w-8 h-8 border-3 border-red-500 border-t-transparent rounded-full animate-spin mb-2" />
+                          <span className="text-xs text-white font-semibold">Uploading to Storage...</span>
+                          <span className="text-xs font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Controls & Upload Actions */}
+                  <div className="sm:col-span-8 space-y-3.5">
+                    <input
+                      ref={thumbnailFileInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/jpg"
+                      onChange={handleThumbnailUpload}
+                      disabled={thumbnailUploading}
+                      className="hidden"
+                    />
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-xs font-bold text-slate-200">
+                          Upload Thumbnail File
+                        </label>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          JPG, JPEG, PNG, WebP (Max 10 MB)
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        Select a high-resolution poster. The file is uploaded separately to Firebase Storage, keeping the video file unchanged.
+                      </p>
+
+                      <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => thumbnailFileInputRef.current?.click()}
+                          disabled={thumbnailUploading}
+                          className="flex items-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-500 active:bg-red-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-lg shadow-red-950/50 transition-all hover:scale-[1.01]"
+                        >
+                          <UploadCloud className="w-4 h-4" />
+                          <span>
+                            {currentNewMovie.posterUrl ? 'Choose Different Thumbnail' : 'Choose Thumbnail / Upload Poster'}
+                          </span>
+                        </button>
+
+                        {currentNewMovie.posterUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setCurrentNewMovie({ ...currentNewMovie, posterUrl: '' })}
+                            className="px-3 py-2 text-xs text-slate-400 hover:text-red-400 transition-colors"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Upload Progress Bar */}
+                    {thumbnailUploading && (
+                      <div className="space-y-1.5 p-3 bg-black/40 rounded-xl border border-slate-800">
+                        <div className="flex justify-between text-xs text-slate-300">
+                          <span>Uploading thumbnail to Firebase Storage...</span>
+                          <span className="font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
+                        </div>
+                        <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-red-600 transition-all duration-150"
+                            style={{ width: `${thumbnailUploadProgress}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Success Notification */}
+                    {thumbnailUploadSuccess && (
+                      <div className="p-3 bg-emerald-950/60 border border-emerald-800/80 rounded-xl flex items-center gap-2 text-xs text-emerald-300">
+                        <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                        <span className="truncate">{thumbnailUploadSuccess}</span>
+                      </div>
+                    )}
+
+                    {/* Error Notification */}
+                    {thumbnailUploadError && (
+                      <div className="p-3 bg-red-950/60 border border-red-800/80 rounded-xl flex items-center gap-2 text-xs text-red-300">
+                        <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+                        <span>{thumbnailUploadError}</span>
+                      </div>
+                    )}
+
+                    {/* Direct Poster URL fallback */}
+                    <div className="pt-2 border-t border-slate-800/80">
+                      <label className="block text-[11px] font-semibold text-slate-400 mb-1">
+                        Or enter direct image URL:
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={currentNewMovie.posterUrl || ''}
+                          onChange={(e) => setCurrentNewMovie({
+                            ...currentNewMovie,
+                            posterUrl: e.target.value,
+                            backdropUrl: currentNewMovie.backdropUrl || e.target.value,
+                          })}
+                          placeholder="https://.../poster.jpg"
+                          className="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs font-mono text-slate-200"
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 

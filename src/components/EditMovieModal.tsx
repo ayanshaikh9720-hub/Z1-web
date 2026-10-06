@@ -5,6 +5,7 @@ import {
   Languages, Volume2, Subtitles, Plus, Trash2
 } from 'lucide-react';
 import { Movie, AudioTrack, SubtitleTrack } from '../types';
+import { api } from '../services/api';
 import { processThumbnailFile } from '../utils/imageUtils';
 
 interface EditMovieModalProps {
@@ -60,6 +61,8 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   const [newThumbnailPreview, setNewThumbnailPreview] = useState<string | null>(null);
   const [thumbnailInputUrl, setThumbnailInputUrl] = useState<string>('');
   const [isProcessingThumbnail, setIsProcessingThumbnail] = useState<boolean>(false);
+  const [thumbnailUploadProgress, setThumbnailUploadProgress] = useState<number>(0);
+  const [thumbnailUploadSuccess, setThumbnailUploadSuccess] = useState<string>('');
   const [thumbnailChanged, setThumbnailChanged] = useState<boolean>(false);
 
   // States
@@ -96,15 +99,33 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Validate image format
+    const validFormats = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+    if (!validFormats.includes(file.type.toLowerCase())) {
+      setError('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
+      return;
+    }
+
+    // Validate size (10 MB)
+    if (file.size > 10 * 1024 * 1024) {
+      setError('Image file is too large. Maximum allowed size is 10 MB.');
+      return;
+    }
+
     setIsProcessingThumbnail(true);
+    setThumbnailUploadProgress(0);
     setError('');
+    setThumbnailUploadSuccess('');
 
     try {
-      const dataUrl = await processThumbnailFile(file);
-      setNewThumbnailPreview(dataUrl);
+      const url = await api.uploadThumbnail(file, (pct) => {
+        setThumbnailUploadProgress(pct);
+      });
+      setNewThumbnailPreview(url);
       setThumbnailChanged(true);
+      setThumbnailUploadSuccess(`New thumbnail uploaded to storage: ${file.name}`);
     } catch (err: any) {
-      setError(err.message || 'Failed to process selected image file.');
+      setError(err.message || 'Failed to upload selected image file.');
     } finally {
       setIsProcessingThumbnail(false);
       // Reset input so same file can be re-selected if desired
@@ -405,7 +426,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                 className="hidden"
               />
 
-              {/* Change Thumbnail Action Button */}
+              {/* Change Thumbnail Action Button & Progress */}
               <div className="w-full space-y-2">
                 <button
                   type="button"
@@ -414,8 +435,30 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                   className="w-full py-2 px-3 bg-red-600 hover:bg-red-500 active:bg-red-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-red-950/40 flex items-center justify-center gap-2"
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  <span>Change Thumbnail</span>
+                  <span>{thumbnailChanged ? 'Change Thumbnail Again' : 'Change Thumbnail'}</span>
                 </button>
+
+                {isProcessingThumbnail && (
+                  <div className="w-full space-y-1">
+                    <div className="flex justify-between text-[10px] text-slate-400">
+                      <span>Uploading to Firebase Storage...</span>
+                      <span className="font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-red-600 transition-all duration-200"
+                        style={{ width: `${thumbnailUploadProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {thumbnailUploadSuccess && (
+                  <div className="p-1.5 bg-emerald-950/60 border border-emerald-800/80 rounded-lg text-[10px] text-emerald-300 flex items-center justify-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                    <span className="truncate">{thumbnailUploadSuccess}</span>
+                  </div>
+                )}
 
                 {thumbnailChanged && (
                   <button

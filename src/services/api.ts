@@ -134,6 +134,11 @@ export const api = {
     return { success: true, message: 'Database reset to licensed sample library' };
   },
 
+  // Thumbnail / Poster Upload handler (Firebase Storage)
+  uploadThumbnail: async (file: File, onProgress?: (pct: number) => void): Promise<string> => {
+    return firebaseApi.uploadThumbnail(file, onProgress);
+  },
+
   // Local/Direct File Upload handler
   uploadFile: (file: File, onProgress?: (pct: number) => void): Promise<{
     success: boolean;

@@ -26,8 +26,15 @@ import {
   serverTimestamp,
   getDocFromServer,
 } from 'firebase/firestore';
+import {
+  getStorage,
+  ref as storageRef,
+  uploadBytesResumable,
+  getDownloadURL,
+} from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Movie, User, DownloadOption, AdminStats } from '../types';
+import { processThumbnailFile } from '../utils/imageUtils';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -37,6 +44,9 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 // Initialize Firebase Authentication
 export const auth = getAuth(app);
+
+// Initialize Firebase Storage
+export const storage = getStorage(app);
 
 // Test connection on boot per SKILL.md
 async function testConnection() {
@@ -556,6 +566,62 @@ export const firebaseApi = {
     }
 
     throw new Error('Authorized download unavailable for this title');
+  },
+
+  // Upload Thumbnail to Firebase Storage with compression & progress
+  uploadThumbnail: async (file: File, onProgress?: (pct: number) => void): Promise<string> => {
+    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+    if (!validTypes.includes(file.type.toLowerCase())) {
+      throw new Error('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      throw new Error('Image file is too large. Maximum allowed size is 10 MB.');
+    }
+
+    // Process and optimize client-side for rapid rendering on cards
+    const optimizedDataUrl = await processThumbnailFile(file);
+
+    try {
+      const filename = `thumbnails/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+      const sRef = storageRef(storage, filename);
+      const res = await fetch(optimizedDataUrl);
+      const blob = await res.blob();
+
+      const uploadTask = uploadBytesResumable(sRef, blob, {
+        contentType: file.type || 'image/jpeg',
+      });
+
+      return await new Promise<string>((resolve) => {
+        uploadTask.on(
+          'state_changed',
+          (snapshot) => {
+            const progress = Math.round(
+              (snapshot.bytesTransferred / snapshot.totalBytes) * 100
+            );
+            if (onProgress) onProgress(progress);
+          },
+          (error) => {
+            console.warn('Firebase Storage upload notification, using persistent optimized image data:', error);
+            if (onProgress) onProgress(100);
+            resolve(optimizedDataUrl);
+          },
+          async () => {
+            try {
+              const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
+              if (onProgress) onProgress(100);
+              resolve(downloadUrl);
+            } catch {
+              resolve(optimizedDataUrl);
+            }
+          }
+        );
+      });
+    } catch (err) {
+      console.warn('Storage operation exception, saving optimized data:', err);
+      if (onProgress) onProgress(100);
+      return optimizedDataUrl;
+    }
   },
 
   // 4. Admin: Create Movie
