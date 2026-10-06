@@ -46,7 +46,22 @@ export const AdminPage: React.FC<AdminPageProps> = ({
   const [thumbnailUploadProgress, setThumbnailUploadProgress] = useState<number>(0);
   const [thumbnailUploadSuccess, setThumbnailUploadSuccess] = useState<string>('');
   const [thumbnailUploadError, setThumbnailUploadError] = useState<string>('');
+  const [selectedThumbnailFile, setSelectedThumbnailFile] = useState<File | null>(null);
   const thumbnailFileInputRef = useRef<HTMLInputElement>(null);
+  const activeThumbnailUploadTask = useRef<any>(null);
+
+  // Clean up any in-flight upload task on unmount
+  useEffect(() => {
+    return () => {
+      if (activeThumbnailUploadTask.current) {
+        try {
+          activeThumbnailUploadTask.current.cancel();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
 
   // Video Upload states
   const [uploadProgress, setUploadProgress] = useState<number>(0);
@@ -155,52 +170,82 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     setThumbnailUploadProgress(0);
     setThumbnailUploadSuccess('');
     setThumbnailUploadError('');
+    setSelectedThumbnailFile(null);
+    activeThumbnailUploadTask.current = null;
     setNewMovieModalOpen(true);
   };
 
   // Thumbnail Upload Handler for Add New Movie (Firebase Storage)
-  const handleThumbnailUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const executeThumbnailUpload = async (file: File) => {
+    if (thumbnailUploading) return; // Prevent duplicate upload triggers
 
     // Validate image format (JPG, JPEG, PNG, WebP)
     const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-    if (!validTypes.includes(file.type.toLowerCase())) {
-      setThumbnailUploadError('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
+    const validExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
+    const lowerName = file.name.toLowerCase();
+    const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
+    const hasValidMime = validTypes.includes(file.type.toLowerCase());
+    if (!hasValidMime && !hasValidExt) {
+      setThumbnailUploadError('Thumbnail upload failed: Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
       return;
     }
 
     // Validate size (10 MB)
     if (file.size > 10 * 1024 * 1024) {
-      setThumbnailUploadError('Image file is too large. Maximum allowed size is 10 MB.');
+      setThumbnailUploadError('Thumbnail upload failed: Image file is too large. Maximum allowed size is 10 MB.');
       return;
     }
 
+    setSelectedThumbnailFile(file);
     setThumbnailUploading(true);
     setThumbnailUploadProgress(0);
     setThumbnailUploadError('');
     setThumbnailUploadSuccess('');
 
     try {
-      const url = await api.uploadThumbnail(file, (pct) => {
-        setThumbnailUploadProgress(pct);
-      });
+      const targetMovieId = currentNewMovie?.id || `new_${Date.now()}`;
+      const downloadUrl = await api.uploadThumbnail(
+        file,
+        targetMovieId,
+        (pct) => {
+          setThumbnailUploadProgress(pct);
+        },
+        (task) => {
+          activeThumbnailUploadTask.current = task;
+        }
+      );
 
       if (currentNewMovie) {
         setCurrentNewMovie({
           ...currentNewMovie,
-          posterUrl: url,
-          backdropUrl: currentNewMovie.backdropUrl || url,
+          posterUrl: downloadUrl,
+          backdropUrl: currentNewMovie.backdropUrl || downloadUrl,
         });
       }
       setThumbnailUploadSuccess(`Thumbnail uploaded successfully: ${file.name}`);
     } catch (err: any) {
-      setThumbnailUploadError(err.message || 'Thumbnail upload failed');
+      console.error('Thumbnail upload failed in AdminPage:', err);
+      setThumbnailUploadError(`Thumbnail upload failed: ${err.message || 'Unknown Firebase error'}`);
     } finally {
       setThumbnailUploading(false);
+      activeThumbnailUploadTask.current = null;
       if (thumbnailFileInputRef.current) {
         thumbnailFileInputRef.current.value = '';
       }
+    }
+  };
+
+  const handleThumbnailUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    executeThumbnailUpload(file);
+  };
+
+  const handleRetryThumbnailUpload = () => {
+    if (selectedThumbnailFile) {
+      executeThumbnailUpload(selectedThumbnailFile);
+    } else if (thumbnailFileInputRef.current) {
+      thumbnailFileInputRef.current.click();
     }
   };
 
@@ -843,15 +888,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                           type="button"
                           onClick={() => thumbnailFileInputRef.current?.click()}
                           disabled={thumbnailUploading}
-                          className="flex items-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-500 active:bg-red-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-lg shadow-red-950/50 transition-all hover:scale-[1.01]"
+                          className="flex items-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-500 active:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl shadow-lg shadow-red-950/50 transition-all hover:scale-[1.01]"
                         >
-                          <UploadCloud className="w-4 h-4" />
-                          <span>
-                            {currentNewMovie.posterUrl ? 'Choose Different Thumbnail' : 'Choose Thumbnail / Upload Poster'}
-                          </span>
+                          {thumbnailUploading ? (
+                            <>
+                              <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              <span>Uploading thumbnail... {thumbnailUploadProgress}%</span>
+                            </>
+                          ) : (
+                            <>
+                              <UploadCloud className="w-4 h-4" />
+                              <span>
+                                {currentNewMovie.posterUrl ? 'Choose Different Thumbnail' : 'Choose Thumbnail / Upload Poster'}
+                              </span>
+                            </>
+                          )}
                         </button>
 
-                        {currentNewMovie.posterUrl && (
+                        {currentNewMovie.posterUrl && !thumbnailUploading && (
                           <button
                             type="button"
                             onClick={() => setCurrentNewMovie({ ...currentNewMovie, posterUrl: '' })}
@@ -887,11 +941,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                       </div>
                     )}
 
-                    {/* Error Notification */}
+                    {/* Error Notification with Retry button */}
                     {thumbnailUploadError && (
-                      <div className="p-3 bg-red-950/60 border border-red-800/80 rounded-xl flex items-center gap-2 text-xs text-red-300">
-                        <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
-                        <span>{thumbnailUploadError}</span>
+                      <div className="p-3 bg-red-950/70 border border-red-800/80 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-red-200">
+                        <div className="flex items-start gap-2 min-w-0">
+                          <AlertTriangle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
+                          <span className="break-words font-medium">{thumbnailUploadError}</span>
+                        </div>
+                        {selectedThumbnailFile && (
+                          <button
+                            type="button"
+                            onClick={handleRetryThumbnailUpload}
+                            disabled={thumbnailUploading}
+                            className="px-3 py-1.5 bg-red-600 hover:bg-red-500 active:bg-red-700 disabled:opacity-50 text-white rounded-lg font-bold text-xs shrink-0 flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>Retry</span>
+                          </button>
+                        )}
                       </div>
                     )}
 

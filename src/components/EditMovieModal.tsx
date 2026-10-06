@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Film, Image as ImageIcon, Upload, Check, AlertTriangle, X,
   Lock, Star, Flame, Eye, RefreshCw, CheckCircle2, Shield,
@@ -63,7 +63,24 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   const [isProcessingThumbnail, setIsProcessingThumbnail] = useState<boolean>(false);
   const [thumbnailUploadProgress, setThumbnailUploadProgress] = useState<number>(0);
   const [thumbnailUploadSuccess, setThumbnailUploadSuccess] = useState<string>('');
+  const [thumbnailUploadError, setThumbnailUploadError] = useState<string>('');
+  const [selectedThumbnailFile, setSelectedThumbnailFile] = useState<File | null>(null);
   const [thumbnailChanged, setThumbnailChanged] = useState<boolean>(false);
+
+  // Active task ref for cleanup
+  const activeThumbnailUploadTask = useRef<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (activeThumbnailUploadTask.current) {
+        try {
+          activeThumbnailUploadTask.current.cancel();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
 
   // States
   const [saving, setSaving] = useState<boolean>(false);
@@ -94,42 +111,71 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
     }
   };
 
-  // Handle Thumbnail File Selection
-  const handleThumbnailFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Execute Thumbnail Upload with Resumable Firebase Storage
+  const executeThumbnailUpload = async (file: File) => {
+    if (isProcessingThumbnail) return; // Prevent duplicate upload triggers
 
-    // Validate image format
+    // Validate image format (JPG, JPEG, PNG, WebP)
     const validFormats = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-    if (!validFormats.includes(file.type.toLowerCase())) {
-      setError('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
+    const validExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
+    const lowerName = file.name.toLowerCase();
+    const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
+    const hasValidMime = validFormats.includes(file.type.toLowerCase());
+    if (!hasValidMime && !hasValidExt) {
+      setThumbnailUploadError('Thumbnail upload failed: Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
       return;
     }
 
     // Validate size (10 MB)
     if (file.size > 10 * 1024 * 1024) {
-      setError('Image file is too large. Maximum allowed size is 10 MB.');
+      setThumbnailUploadError('Thumbnail upload failed: Image file is too large. Maximum allowed size is 10 MB.');
       return;
     }
 
+    setSelectedThumbnailFile(file);
     setIsProcessingThumbnail(true);
     setThumbnailUploadProgress(0);
-    setError('');
+    setThumbnailUploadError('');
     setThumbnailUploadSuccess('');
+    setError('');
 
     try {
-      const url = await api.uploadThumbnail(file, (pct) => {
-        setThumbnailUploadProgress(pct);
-      });
-      setNewThumbnailPreview(url);
+      const downloadUrl = await api.uploadThumbnail(
+        file,
+        movie.id,
+        (pct) => {
+          setThumbnailUploadProgress(pct);
+        },
+        (task) => {
+          activeThumbnailUploadTask.current = task;
+        }
+      );
+      setNewThumbnailPreview(downloadUrl);
       setThumbnailChanged(true);
       setThumbnailUploadSuccess(`New thumbnail uploaded to storage: ${file.name}`);
     } catch (err: any) {
-      setError(err.message || 'Failed to upload selected image file.');
+      console.error('Thumbnail upload error in EditMovieModal:', err);
+      setThumbnailUploadError(`Thumbnail upload failed: ${err.message || 'Unknown Firebase error'}`);
     } finally {
       setIsProcessingThumbnail(false);
-      // Reset input so same file can be re-selected if desired
+      activeThumbnailUploadTask.current = null;
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // Handle Thumbnail File Selection
+  const handleThumbnailFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    executeThumbnailUpload(file);
+  };
+
+  // Handle Retry Thumbnail Upload
+  const handleRetryThumbnail = () => {
+    if (selectedThumbnailFile) {
+      executeThumbnailUpload(selectedThumbnailFile);
+    } else if (fileInputRef.current) {
+      fileInputRef.current.click();
     }
   };
 
@@ -410,9 +456,10 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                   referrerPolicy="no-referrer"
                 />
                 {isProcessingThumbnail && (
-                  <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2">
-                    <div className="w-6 h-6 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-[10px] text-slate-300">Optimizing...</span>
+                  <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-2 text-center z-10">
+                    <div className="w-7 h-7 border-2 border-red-500 border-t-transparent rounded-full animate-spin mb-1.5" />
+                    <span className="text-[11px] text-white font-semibold">Uploading to Storage...</span>
+                    <span className="text-xs font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
                   </div>
                 )}
               </div>
@@ -421,8 +468,9 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/jpeg,image/png,image/webp,image/gif"
+                accept="image/jpeg,image/png,image/webp,image/jpg"
                 onChange={handleThumbnailFileSelect}
+                disabled={isProcessingThumbnail}
                 className="hidden"
               />
 
@@ -432,21 +480,30 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isProcessingThumbnail || saving}
-                  className="w-full py-2 px-3 bg-red-600 hover:bg-red-500 active:bg-red-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-red-950/40 flex items-center justify-center gap-2"
+                  className="w-full py-2.5 px-3 bg-red-600 hover:bg-red-500 active:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-red-950/40 flex items-center justify-center gap-2"
                 >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>{thumbnailChanged ? 'Change Thumbnail Again' : 'Change Thumbnail'}</span>
+                  {isProcessingThumbnail ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Uploading thumbnail... {thumbnailUploadProgress}%</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{thumbnailChanged ? 'Change Thumbnail Again' : 'Change Thumbnail'}</span>
+                    </>
+                  )}
                 </button>
 
                 {isProcessingThumbnail && (
-                  <div className="w-full space-y-1">
-                    <div className="flex justify-between text-[10px] text-slate-400">
+                  <div className="w-full space-y-1 p-2 bg-black/40 rounded-xl border border-slate-800">
+                    <div className="flex justify-between text-[10px] text-slate-300">
                       <span>Uploading to Firebase Storage...</span>
                       <span className="font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
                     </div>
                     <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
                       <div
-                        className="h-full bg-red-600 transition-all duration-200"
+                        className="h-full bg-red-600 transition-all duration-150"
                         style={{ width: `${thumbnailUploadProgress}%` }}
                       />
                     </div>
@@ -457,6 +514,26 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                   <div className="p-1.5 bg-emerald-950/60 border border-emerald-800/80 rounded-lg text-[10px] text-emerald-300 flex items-center justify-center gap-1">
                     <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
                     <span className="truncate">{thumbnailUploadSuccess}</span>
+                  </div>
+                )}
+
+                {thumbnailUploadError && (
+                  <div className="p-2.5 bg-red-950/70 border border-red-800/80 rounded-xl flex flex-col gap-2 text-[11px] text-red-200 text-left">
+                    <div className="flex items-start gap-1.5 min-w-0">
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                      <span className="break-words font-medium">{thumbnailUploadError}</span>
+                    </div>
+                    {selectedThumbnailFile && (
+                      <button
+                        type="button"
+                        onClick={handleRetryThumbnail}
+                        disabled={isProcessingThumbnail}
+                        className="self-end px-2.5 py-1 bg-red-600 hover:bg-red-500 active:bg-red-700 disabled:opacity-50 text-white rounded-lg font-bold text-[10px] flex items-center gap-1 shadow-sm"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        <span>Retry</span>
+                      </button>
+                    )}
                   </div>
                 )}
 

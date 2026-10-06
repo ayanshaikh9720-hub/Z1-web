@@ -47,6 +47,8 @@ export const auth = getAuth(app);
 
 // Initialize Firebase Storage
 export const storage = getStorage(app);
+storage.maxUploadRetryTime = 25000;
+storage.maxOperationRetryTime = 25000;
 
 // Test connection on boot per SKILL.md
 async function testConnection() {
@@ -568,60 +570,140 @@ export const firebaseApi = {
     throw new Error('Authorized download unavailable for this title');
   },
 
-  // Upload Thumbnail to Firebase Storage with compression & progress
-  uploadThumbnail: async (file: File, onProgress?: (pct: number) => void): Promise<string> => {
-    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-    if (!validTypes.includes(file.type.toLowerCase())) {
+  // Upload Thumbnail to Firebase Storage using resumable uploadBytesResumable
+  uploadThumbnail: async (
+    file: File,
+    movieId?: string,
+    onProgress?: (pct: number) => void,
+    onTaskCreated?: (task: any) => void
+  ): Promise<string> => {
+    // 1. Format validation
+    const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+    const validExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
+    const lowerName = file.name.toLowerCase();
+    const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
+    const hasValidMime = validMimes.includes(file.type.toLowerCase());
+
+    if (!hasValidMime && !hasValidExt) {
       throw new Error('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
     }
 
-    if (file.size > 10 * 1024 * 1024) {
+    // 2. Size validation (Max 10 MB)
+    const MAX_SIZE_BYTES = 10 * 1024 * 1024;
+    if (file.size > MAX_SIZE_BYTES) {
       throw new Error('Image file is too large. Maximum allowed size is 10 MB.');
     }
 
-    // Process and optimize client-side for rapid rendering on cards
-    const optimizedDataUrl = await processThumbnailFile(file);
+    // 3. Target path: movie-thumbnails/{movieId}/{uniqueFileName}
+    const cleanMovieId = (movieId || `new_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const uniqueFileName = `${Date.now()}_${cleanFileName}`;
+    const storagePath = `movie-thumbnails/${cleanMovieId}/${uniqueFileName}`;
+    const fileRef = storageRef(storage, storagePath);
 
-    try {
-      const filename = `thumbnails/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-      const sRef = storageRef(storage, filename);
-      const res = await fetch(optimizedDataUrl);
-      const blob = await res.blob();
+    const metadata = {
+      contentType: file.type || 'image/jpeg',
+      customMetadata: {
+        movieId: cleanMovieId,
+        originalName: file.name,
+        uploadedAt: new Date().toISOString(),
+      },
+    };
 
-      const uploadTask = uploadBytesResumable(sRef, blob, {
-        contentType: file.type || 'image/jpeg',
-      });
+    // 4. Create resumable upload task
+    const uploadTask = uploadBytesResumable(fileRef, file, metadata);
+    if (onTaskCreated) {
+      onTaskCreated(uploadTask);
+    }
 
-      return await new Promise<string>((resolve) => {
-        uploadTask.on(
-          'state_changed',
-          (snapshot) => {
+    return new Promise<string>((resolve, reject) => {
+      let isSettled = false;
+
+      // Fail-safe timeout to prevent hanging at 0% if connection stalls
+      const hangTimeout = setTimeout(() => {
+        if (!isSettled) {
+          isSettled = true;
+          try {
+            uploadTask.cancel();
+          } catch {
+            // ignore
+          }
+          reject(
+            new Error(
+              'Upload timed out. Firebase Storage did not respond. Please check network connection and Firebase Storage permissions.'
+            )
+          );
+        }
+      }, 35000);
+
+      uploadTask.on(
+        'state_changed',
+        (snapshot) => {
+          if (snapshot.totalBytes > 0) {
             const progress = Math.round(
               (snapshot.bytesTransferred / snapshot.totalBytes) * 100
             );
-            if (onProgress) onProgress(progress);
-          },
-          (error) => {
-            console.warn('Firebase Storage upload notification, using persistent optimized image data:', error);
-            if (onProgress) onProgress(100);
-            resolve(optimizedDataUrl);
-          },
-          async () => {
-            try {
-              const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
-              if (onProgress) onProgress(100);
-              resolve(downloadUrl);
-            } catch {
-              resolve(optimizedDataUrl);
+            const clamped = Math.max(0, Math.min(100, progress));
+            if (onProgress) {
+              onProgress(clamped);
             }
           }
-        );
-      });
-    } catch (err) {
-      console.warn('Storage operation exception, saving optimized data:', err);
-      if (onProgress) onProgress(100);
-      return optimizedDataUrl;
-    }
+        },
+        (error: any) => {
+          if (isSettled) return;
+          isSettled = true;
+          clearTimeout(hangTimeout);
+
+          console.error('Firebase Storage upload error:', error);
+
+          let userMessage = error?.message || 'Storage upload error occurred';
+          if (error?.code) {
+            switch (error.code) {
+              case 'storage/unauthorized':
+                userMessage =
+                  'Firebase Storage permission denied (storage/unauthorized). Please verify your Admin login and Storage security rules.';
+                break;
+              case 'storage/canceled':
+                userMessage = 'Upload was canceled.';
+                break;
+              case 'storage/retry-limit-exceeded':
+                userMessage = 'Upload timed out. Firebase Storage could not be reached.';
+                break;
+              case 'storage/bucket-not-found':
+                userMessage = `Firebase Storage bucket not found: ${firebaseConfig.storageBucket || 'check storageBucket in configuration'}.`;
+                break;
+              case 'storage/quota-exceeded':
+                userMessage = 'Firebase Storage quota exceeded for this project.';
+                break;
+              case 'storage/unknown':
+                userMessage = `Storage error (${error.serverResponse || error.message || 'unknown error'})`;
+                break;
+              default:
+                userMessage = `[${error.code}] ${error.message}`;
+            }
+          }
+          reject(new Error(userMessage));
+        },
+        async () => {
+          if (isSettled) return;
+          isSettled = true;
+          clearTimeout(hangTimeout);
+
+          try {
+            if (onProgress) onProgress(100);
+            const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
+            resolve(downloadUrl);
+          } catch (err: any) {
+            console.error('Error retrieving download URL after upload:', err);
+            reject(
+              new Error(
+                err?.message || 'Failed to retrieve download URL from Firebase Storage.'
+              )
+            );
+          }
+        }
+      );
+    });
   },
 
   // 4. Admin: Create Movie

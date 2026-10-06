@@ -135,8 +135,13 @@ export const api = {
   },
 
   // Thumbnail / Poster Upload handler (Firebase Storage)
-  uploadThumbnail: async (file: File, onProgress?: (pct: number) => void): Promise<string> => {
-    return firebaseApi.uploadThumbnail(file, onProgress);
+  uploadThumbnail: async (
+    file: File,
+    movieId?: string,
+    onProgress?: (pct: number) => void,
+    onTaskCreated?: (task: any) => void
+  ): Promise<string> => {
+    return firebaseApi.uploadThumbnail(file, movieId, onProgress, onTaskCreated);
   },
 
   // Local/Direct File Upload handler
