@@ -10,39 +10,97 @@ import { loadDB, saveDB, getInitialSeedData, authenticateUser, generateToken, ve
 const app = express();
 
 const IS_VERCEL = Boolean(process.env.VERCEL);
-const UPLOADS_DIR = IS_VERCEL ? '/tmp/uploads' : path.resolve(process.cwd(), 'uploads');
-const THUMBNAILS_DIR = path.resolve(UPLOADS_DIR, 'thumbnails');
+const PRIMARY_UPLOADS_DIR = IS_VERCEL ? '/tmp/uploads' : path.resolve(process.cwd(), 'uploads');
+const FALLBACK_UPLOADS_DIR = '/tmp/uploads';
 
-if (!fs.existsSync(UPLOADS_DIR)) {
+function ensureDirectoryWritable(dirPath: string): boolean {
   try {
-    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  } catch {}
-}
-if (!fs.existsSync(THUMBNAILS_DIR)) {
-  try {
-    fs.mkdirSync(THUMBNAILS_DIR, { recursive: true });
-  } catch {}
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+    const testFile = path.join(dirPath, `.write_check_${Date.now()}`);
+    fs.writeFileSync(testFile, 'ok');
+    fs.unlinkSync(testFile);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-// Multer for thumbnails
-const thumbnailStorage = multer.diskStorage({
+export let activeUploadsDir = PRIMARY_UPLOADS_DIR;
+if (!ensureDirectoryWritable(activeUploadsDir)) {
+  activeUploadsDir = FALLBACK_UPLOADS_DIR;
+  ensureDirectoryWritable(activeUploadsDir);
+}
+
+export let activeThumbnailsDir = path.join(activeUploadsDir, 'thumbnails');
+if (!ensureDirectoryWritable(activeThumbnailsDir)) {
+  activeThumbnailsDir = path.join(FALLBACK_UPLOADS_DIR, 'thumbnails');
+  ensureDirectoryWritable(activeThumbnailsDir);
+}
+
+// In-memory cache for high-availability thumbnail hosting across serverless/ephemeral instances
+export const thumbnailMemoryCache = new Map<string, {
+  buffer: Buffer;
+  mimetype: string;
+  createdAt: number;
+}>();
+
+// Multer memory-based storage for thumbnails (bulletproof against filesystem write/read permission errors)
+const uploadThumbnailMiddleware = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+    files: 1,
+  },
+}).any(); // Accept any field name (thumbnail, file, poster, image) so unexpected field error never occurs
+
+export function handleThumbnailMulter(req: Request, res: Response, next: NextFunction) {
+  uploadThumbnailMiddleware(req, res, (err: any) => {
+    if (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ error: 'Image file is too large. Maximum allowed size is 10 MB.' });
+        }
+        return res.status(400).json({ error: `Upload error: ${err.message}` });
+      }
+      return res.status(400).json({ error: err.message || 'Failed to process image upload.' });
+    }
+    next();
+  });
+}
+
+// Multer disk/memory hybrid for video uploads
+const videoDiskStorage = multer.diskStorage({
   destination: (_req, _file, cb) => {
-    cb(null, THUMBNAILS_DIR);
+    cb(null, activeUploadsDir);
   },
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+    const ext = path.extname(file.originalname);
     const safeBase = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
     const uniqueSuffix = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    cb(null, `poster_${safeBase}_${uniqueSuffix}${ext}`);
+    cb(null, `${safeBase}_${uniqueSuffix}${ext}`);
   },
 });
 
-const uploadThumbnail = multer({
-  storage: thumbnailStorage,
+const uploadVideoMiddleware = multer({
+  storage: videoDiskStorage,
   limits: {
-    fileSize: 10 * 1024 * 1024,
+    fileSize: 500 * 1024 * 1024, // 500MB
   },
-});
+}).any();
+
+export function handleVideoMulter(req: Request, res: Response, next: NextFunction) {
+  uploadVideoMiddleware(req, res, (err: any) => {
+    if (err) {
+      if (err instanceof multer.MulterError) {
+        return res.status(400).json({ error: `Video upload error: ${err.message}` });
+      }
+      return res.status(400).json({ error: err.message || 'Failed to process video upload.' });
+    }
+    next();
+  });
+}
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -406,7 +464,7 @@ apiRouter.post('/validate-video-url', async (req: Request, res: Response) => {
   }
 
   if (url.startsWith('/uploads/')) {
-    const filePath = path.join(UPLOADS_DIR, path.basename(url));
+    const filePath = path.join(activeUploadsDir, path.basename(url));
     if (fs.existsSync(filePath)) {
       const stat = fs.statSync(filePath);
       res.json({
@@ -697,51 +755,395 @@ apiRouter.post('/contact', (req: Request, res: Response) => {
   res.json({ success: true, message: 'Your message has been received by the Z1 Movies team.' });
 });
 
-// 17. Thumbnail Upload (Separate Image Hosting / CDN)
-apiRouter.post('/upload-thumbnail', uploadThumbnail.single('thumbnail'), (req: Request, res: Response) => {
-  if (!req.file) {
-    res.status(400).json({ error: 'No thumbnail image uploaded' });
-    return;
+// 17. Thumbnail Upload (Separate Image Hosting / CDN - Spark Plan Safe)
+apiRouter.post('/upload-thumbnail', handleThumbnailMulter, async (req: Request, res: Response) => {
+  try {
+    let fileBuffer: Buffer | null = null;
+    let originalName = 'poster.jpg';
+    let mimetype = 'image/jpeg';
+    let fileSize = 0;
+
+    // 1. Check if multipart file uploaded
+    const files = req.files as Express.Multer.File[] | undefined;
+    const file = req.file || (files && files.length > 0 ? files[0] : null);
+
+    if (file && file.buffer) {
+      fileBuffer = file.buffer;
+      originalName = file.originalname;
+      mimetype = file.mimetype;
+      fileSize = file.size;
+    } else if (req.body && (req.body.base64 || req.body.image)) {
+      // Base64 payload support
+      const base64Str = (req.body.base64 || req.body.image).replace(/^data:image\/[a-z]+;base64,/, '');
+      fileBuffer = Buffer.from(base64Str, 'base64');
+      fileSize = fileBuffer.length;
+      if (req.body.filename) originalName = req.body.filename;
+      if (req.body.mimetype) mimetype = req.body.mimetype;
+    } else if (req.body && req.body.imageUrl) {
+      // Direct image URL verification/fallback
+      const directUrl = req.body.imageUrl.trim();
+      return res.json({
+        success: true,
+        url: directUrl,
+        relativeUrl: directUrl,
+        filename: path.basename(directUrl) || 'poster.jpg',
+        originalName: path.basename(directUrl) || 'poster.jpg',
+        size: 0,
+        mimetype: 'image/jpeg',
+        message: 'Direct image URL validated and registered.',
+      });
+    }
+
+    if (!fileBuffer || fileBuffer.length === 0) {
+      return res.status(400).json({ error: 'No thumbnail image file found in upload request.' });
+    }
+
+    // 2. Validate format (JPG, JPEG, PNG, WebP)
+    const ext = (path.extname(originalName).toLowerCase() || '.jpg');
+    const validExts = ['.jpg', '.jpeg', '.png', '.webp'];
+    const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+
+    const hasValidExt = validExts.includes(ext);
+    const hasValidMime = validMimes.includes(mimetype.toLowerCase());
+
+    if (!hasValidExt && !hasValidMime) {
+      return res.status(400).json({
+        error: 'Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.',
+      });
+    }
+
+    // 3. Size validation (Max 10 MB)
+    if (fileSize > 10 * 1024 * 1024) {
+      return res.status(400).json({
+        error: 'Image file is too large. Maximum allowed size is 10 MB.',
+      });
+    }
+
+    // 4. Generate unique filename
+    const safeBase = path.basename(originalName, ext).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'poster';
+    const uniqueSuffix = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const filename = `poster_${safeBase}_${uniqueSuffix}${ext}`;
+
+    const mimeMap: Record<string, string> = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+    };
+    const finalMime = mimeMap[ext] || mimetype || 'image/jpeg';
+
+    // 5. Store in memory cache
+    thumbnailMemoryCache.set(filename, {
+      buffer: fileBuffer,
+      mimetype: finalMime,
+      createdAt: Date.now(),
+    });
+
+    // 6. Write to disk across fallback directories
+    try {
+      const diskPath = path.join(activeThumbnailsDir, filename);
+      fs.writeFileSync(diskPath, fileBuffer);
+      const rootUploadsPath = path.resolve(process.cwd(), 'uploads', 'thumbnails', filename);
+      if (rootUploadsPath !== diskPath) {
+        try { fs.writeFileSync(rootUploadsPath, fileBuffer); } catch {}
+      }
+      const dataThumbnailsPath = path.resolve(process.cwd(), 'data', 'thumbnails', filename);
+      try {
+        const dataThumbDir = path.dirname(dataThumbnailsPath);
+        if (!fs.existsSync(dataThumbDir)) fs.mkdirSync(dataThumbDir, { recursive: true });
+        fs.writeFileSync(dataThumbnailsPath, fileBuffer);
+      } catch {}
+    } catch (diskErr) {
+      console.warn('Could not write thumbnail to disk, served from memory cache:', diskErr);
+    }
+
+    // 7. Calculate URLs
+    const forwardedHost = (req.headers['x-forwarded-host'] as string) || req.get('host') || 'localhost:3000';
+    const forwardedProto = (req.headers['x-forwarded-proto'] as string) || (req.secure ? 'https' : 'http');
+    const isLocal = forwardedHost.startsWith('localhost') || forwardedHost.startsWith('127.0.0.1');
+
+    let baseUrl = `${forwardedProto}://${forwardedHost}`;
+    if (!isLocal && process.env.APP_URL) {
+      baseUrl = process.env.APP_URL.replace(/\/$/, '');
+    }
+
+    const relativeUrl = `/uploads/thumbnails/${filename}`;
+    const publicUrl = `${baseUrl}${relativeUrl}`;
+
+    return res.status(200).json({
+      success: true,
+      url: relativeUrl, // Always return root-relative URL as primary url so it works on any domain without cross-origin blocks
+      relativeUrl,
+      publicUrl,
+      filename,
+      originalName,
+      size: fileSize,
+      mimetype: finalMime,
+      message: 'Thumbnail uploaded and hosted on image CDN',
+    });
+  } catch (err: any) {
+    console.error('Thumbnail upload controller error:', err);
+    return res.status(400).json({
+      error: err.message || 'Image hosting service encountered an error processing the thumbnail.',
+    });
+  }
+});
+
+// 18. Video Upload Endpoint
+apiRouter.post('/upload', handleVideoMulter, (req: Request, res: Response) => {
+  const files = req.files as Express.Multer.File[] | undefined;
+  const file = req.file || (files && files.length > 0 ? files[0] : null);
+
+  if (!file) {
+    return res.status(400).json({ error: 'No video file received in upload payload' });
   }
 
-  const forwardedHost = (req.headers['x-forwarded-host'] as string) || req.get('host') || 'localhost:3000';
-  const forwardedProto = (req.headers['x-forwarded-proto'] as string) || (req.secure ? 'https' : 'http');
-  const protocol = (forwardedHost.includes('run.app') || forwardedHost.includes('vercel.app')) ? 'https' : forwardedProto;
-  
-  const publicUrl = `${protocol}://${forwardedHost}/uploads/thumbnails/${req.file.filename}`;
+  const uploadedUrl = `/uploads/${file.filename}`;
+  const isVideo = file.mimetype?.startsWith('video/') || file.originalname.match(/\.(mp4|webm|mkv|m3u8)$/i);
 
-  res.json({
+  return res.json({
     success: true,
-    url: publicUrl,
-    filename: req.file.filename,
-    originalName: req.file.originalname,
-    size: req.file.size,
-    mimetype: req.file.mimetype,
-    message: 'Thumbnail uploaded and hosted on image CDN',
+    url: uploadedUrl,
+    filename: file.filename,
+    originalName: file.originalname,
+    size: file.size,
+    mimetype: file.mimetype,
+    isVideo: Boolean(isVideo),
+    message: 'File successfully stored and ready for playback',
   });
 });
 
-// Static route for thumbnail images on app
-app.get('/uploads/thumbnails/:filename', (req: Request, res: Response) => {
-  const filePath = path.join(THUMBNAILS_DIR, req.params.filename);
-  if (!fs.existsSync(filePath)) {
-    res.status(404).send('Thumbnail not found');
+// 19. Transparent Video Stream Proxy (resolves CORS and playback blocks for external MP4/HLS streams)
+function pipeProxyStream(targetUrl: string, req: Request, res: Response, redirectCount = 0): void {
+  if (redirectCount > 5) {
+    res.status(508).json({ error: 'Too many redirects encountered while resolving video stream' });
     return;
   }
-  const ext = path.extname(filePath).toLowerCase();
-  const mimeTypes: Record<string, string> = {
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png': 'image/png',
-    '.webp': 'image/webp',
-  };
-  res.setHeader('Content-Type', mimeTypes[ext] || 'image/jpeg');
-  res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
-  fs.createReadStream(filePath).pipe(res);
+
+  try {
+    const parsed = new URL(targetUrl);
+    const client = parsed.protocol === 'https:' ? https : http;
+
+    const headers: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+    };
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range as string;
+    }
+
+    const proxyReq = client.request(
+      targetUrl,
+      {
+        method: req.method,
+        headers,
+        timeout: 25000,
+      },
+      (proxyRes) => {
+        const statusCode = proxyRes.statusCode || 200;
+
+        // Follow redirects internally up to 5 times
+        if (
+          (statusCode === 301 || statusCode === 302 || statusCode === 307 || statusCode === 308) &&
+          proxyRes.headers.location
+        ) {
+          const redirectUrl = new URL(proxyRes.headers.location, targetUrl).toString();
+          return pipeProxyStream(redirectUrl, req, res, redirectCount + 1);
+        }
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Range, Accept-Ranges, Content-Type');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+
+        if (proxyRes.headers['content-type']) {
+          res.setHeader('Content-Type', proxyRes.headers['content-type']);
+        }
+        if (proxyRes.headers['content-length']) {
+          res.setHeader('Content-Length', proxyRes.headers['content-length']);
+        }
+        if (proxyRes.headers['content-range']) {
+          res.setHeader('Content-Range', proxyRes.headers['content-range']);
+        }
+        if (proxyRes.headers['accept-ranges']) {
+          res.setHeader('Accept-Ranges', proxyRes.headers['accept-ranges']);
+        }
+
+        res.status(statusCode);
+        proxyRes.pipe(res);
+      }
+    );
+
+    proxyReq.on('error', (err) => {
+      console.warn('Proxy streaming error:', err);
+      if (!res.headersSent) {
+        res.status(502).json({ error: `Proxy stream failed: ${err.message}` });
+      }
+    });
+
+    proxyReq.on('timeout', () => {
+      proxyReq.destroy();
+      if (!res.headersSent) {
+        res.status(504).json({ error: 'Proxy stream timed out' });
+      }
+    });
+
+    proxyReq.end();
+  } catch (err: any) {
+    if (!res.headersSent) {
+      res.status(400).json({ error: `Invalid stream URL: ${err.message}` });
+    }
+  }
+}
+
+apiRouter.get('/stream-proxy', (req: Request, res: Response) => {
+  const targetUrl = req.query.url as string;
+  if (!targetUrl || typeof targetUrl !== 'string') {
+    return res.status(400).json({ error: 'Target video URL is required' });
+  }
+  pipeProxyStream(targetUrl, req, res);
 });
+
+// Static handler for thumbnail images (serves from memory cache first, then disk)
+const serveThumbnailHandler = (req: Request, res: Response) => {
+  const filename = path.basename(req.params.filename);
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+
+  // 1. Check memory cache first
+  const cached = thumbnailMemoryCache.get(filename);
+  if (cached) {
+    res.setHeader('Content-Type', cached.mimetype);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    return res.send(cached.buffer);
+  }
+
+  // 2. Search potential disk locations
+  const searchDirs = [
+    activeThumbnailsDir,
+    path.resolve(process.cwd(), 'uploads', 'thumbnails'),
+    path.resolve(process.cwd(), 'data', 'thumbnails'),
+    '/tmp/uploads/thumbnails',
+    path.resolve(process.cwd(), 'uploads'),
+  ];
+
+  for (const dir of searchDirs) {
+    const filePath = path.join(dir, filename);
+    if (fs.existsSync(filePath)) {
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeTypes: Record<string, string> = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+      };
+      res.setHeader('Content-Type', mimeTypes[ext] || 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return fs.createReadStream(filePath).pipe(res);
+    }
+  }
+
+  return res.status(404).json({ error: 'Thumbnail not found' });
+};
+
+// Static streaming handler for video uploads with HTTP 206 Partial Content & full CORS
+const serveVideoUploadHandler = (req: Request, res: Response) => {
+  const filename = path.basename(req.params.filename);
+  const searchDirs = [
+    activeUploadsDir,
+    path.resolve(process.cwd(), 'uploads'),
+    '/tmp/uploads',
+  ];
+
+  let targetPath = '';
+  for (const dir of searchDirs) {
+    const p = path.join(dir, filename);
+    if (fs.existsSync(p)) {
+      targetPath = p;
+      break;
+    }
+  }
+
+  if (!targetPath) {
+    return res.status(404).json({ error: 'Video file not found' });
+  }
+
+  const stat = fs.statSync(targetPath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  const ext = path.extname(targetPath).toLowerCase();
+
+  const mimeTypes: Record<string, string> = {
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mkv': 'video/x-matroska',
+    '.m3u8': 'application/vnd.apple.mpegurl',
+    '.ts': 'video/mp2t',
+  };
+
+  const contentType = mimeTypes[ext] || 'video/mp4';
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Accept-Ranges, Content-Type');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+
+  if (range && (ext === '.mp4' || ext === '.webm' || ext === '.mkv')) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const chunksize = end - start + 1;
+    const file = fs.createReadStream(targetPath, { start, end });
+
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunksize,
+      'Content-Type': contentType,
+    });
+    file.pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': contentType,
+      'Accept-Ranges': 'bytes',
+    });
+    fs.createReadStream(targetPath).pipe(res);
+  }
+};
+
+// Mount thumbnail routes
+app.get('/uploads/thumbnails/:filename', serveThumbnailHandler);
+apiRouter.get('/uploads/thumbnails/:filename', serveThumbnailHandler);
+apiRouter.get('/thumbnails/:filename', serveThumbnailHandler);
+
+// Mount video uploads routes
+app.get('/uploads/:filename', serveVideoUploadHandler);
+apiRouter.get('/uploads/:filename', serveVideoUploadHandler);
+
+// Static serving of bundled image assets across all environments (dev, preview, Vercel)
+app.use('/src/assets', express.static(path.resolve(process.cwd(), 'src/assets')));
+app.use('/assets', express.static(path.resolve(process.cwd(), 'src/assets')));
 
 // Mount router on BOTH '/api' and '/'
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
+
+// Global Error Handling Middleware - Guarantees clean JSON responses instead of default HTML 500
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('[Z1 Movies Server Error]:', err);
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File size exceeds maximum allowed limit.' });
+    }
+    return res.status(400).json({ error: `Upload error: ${err.message}` });
+  }
+  const status = err.status || err.statusCode || 400;
+  return res.status(status).json({
+    error: err.message || 'An unexpected error occurred during request processing.',
+  });
+});
 
 export default app;

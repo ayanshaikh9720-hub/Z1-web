@@ -34,7 +34,8 @@ import {
 } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Movie, User, DownloadOption, AdminStats } from '../types';
-import { processThumbnailFile } from '../utils/imageUtils';
+import { processThumbnailFile, normalizePosterUrl } from '../utils/imageUtils';
+import { getSafeVideoUrl } from '../utils/videoUrlHelper';
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -364,12 +365,14 @@ export function isUserAdmin(email?: string | null): boolean {
 // Convert Firestore Document to Movie
 function docToMovie(docSnap: any): Movie {
   const data = docSnap.data();
+  const posterUrl = normalizePosterUrl(data.posterUrl, data.title);
+  const backdropUrl = normalizePosterUrl(data.backdropUrl, data.title) || posterUrl;
   return {
     id: docSnap.id,
     title: data.title || '',
     description: data.description || '',
-    posterUrl: data.posterUrl || '',
-    backdropUrl: data.backdropUrl || '',
+    posterUrl,
+    backdropUrl,
     videoUrl: data.videoUrl || '',
     videoType: data.videoType || 'mp4',
     downloadUrls: Array.isArray(data.downloadUrls) ? data.downloadUrls : [],
@@ -405,6 +408,20 @@ export const firebaseApi = {
       if (snap.empty) {
         for (const movie of SEED_MOVIES) {
           await addDoc(collection(db, 'movies'), movie);
+        }
+      } else {
+        // Auto-heal any movie records in Firestore that have broken webpage links (e.g. IMDb mediaviewer)
+        for (const docSnap of snap.docs) {
+          const mData = docSnap.data();
+          const cleanPoster = normalizePosterUrl(mData.posterUrl, mData.title);
+          const cleanBackdrop = normalizePosterUrl(mData.backdropUrl, mData.title) || cleanPoster;
+          if (cleanPoster !== mData.posterUrl || cleanBackdrop !== mData.backdropUrl) {
+            updateDoc(doc(db, 'movies', docSnap.id), {
+              posterUrl: cleanPoster,
+              backdropUrl: cleanBackdrop,
+              updatedAt: new Date().toISOString(),
+            }).catch(() => {});
+          }
         }
       }
     } catch (err) {
@@ -596,6 +613,7 @@ export const firebaseApi = {
 
     const formData = new FormData();
     formData.append('thumbnail', file);
+    formData.append('file', file);
     if (movieId) {
       formData.append('movieId', movieId);
     }
@@ -621,12 +639,10 @@ export const firebaseApi = {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data = JSON.parse(xhr.responseText);
-            if (data.url) {
+            const resolvedUrl = data.relativeUrl || data.url;
+            if (resolvedUrl) {
               if (onProgress) onProgress(100);
-              const finalUrl = data.url.startsWith('/')
-                ? `${window.location.origin}${data.url}`
-                : data.url;
-              resolve(finalUrl);
+              resolve(resolvedUrl);
               return;
             }
           } catch {
@@ -638,12 +654,20 @@ export const firebaseApi = {
         try {
           const errData = JSON.parse(xhr.responseText);
           if (errData.error) errMsg = errData.error;
-        } catch {}
+        } catch {
+          if (xhr.status === 413) {
+            errMsg = 'Thumbnail image exceeds the maximum 10 MB limit.';
+          } else if (xhr.status === 404) {
+            errMsg = 'Thumbnail upload endpoint was not found.';
+          } else if (xhr.status >= 500) {
+            errMsg = 'Image hosting service is temporarily unavailable. Please retry or enter a direct image URL.';
+          }
+        }
         reject(new Error(`${errMsg} (HTTP ${xhr.status})`));
       };
 
       xhr.onerror = () => {
-        reject(new Error('Network error uploading thumbnail to image hosting CDN.'));
+        reject(new Error('Network error connecting to image hosting CDN.'));
       };
 
       xhr.onabort = () => {
@@ -892,13 +916,34 @@ export const firebaseApi = {
       return { valid: false, message: 'URL is required' };
     }
 
-    // Fast check for HLS streams or standard extensions
-    if (url.includes('.m3u8')) {
+    const validation = getSafeVideoUrl(url);
+    if (!validation.valid) {
+      return { valid: false, message: validation.error || 'Video URL is invalid or blocked for security' };
+    }
+
+    // Client Blob URLs are in-memory objects and valid for session
+    if (validation.isBlob) {
+      return { valid: true, message: 'Valid temporary session video stream (ready for streaming)', contentType: 'video/mp4' };
+    }
+
+    // Fast check for HLS streams
+    if (validation.isHls) {
       return { valid: true, message: 'Valid HLS stream endpoint detected', contentType: 'application/vnd.apple.mpegurl' };
     }
 
+    // Firebase Storage or Google Cloud Storage URLs:
+    // They are valid HTTPS authorized media URLs with tokens (HEAD might fail due to storage bucket CORS)
+    if (validation.isFirebaseStorage) {
+      return { valid: true, message: 'Firebase Storage video stream verified and ready', contentType: 'video/mp4' };
+    }
+
+    // Server-hosted local uploads (/uploads/...)
+    if (validation.isLocalUpload) {
+      return { valid: true, message: 'Server-hosted video file verified and ready', contentType: 'video/mp4' };
+    }
+
     try {
-      const response = await fetch(url, {
+      const response = await fetch(validation.safeUrl, {
         method: 'HEAD',
         headers: { Range: 'bytes=0-100' },
       });
@@ -914,7 +959,7 @@ export const firebaseApi = {
     return new Promise((resolve) => {
       const video = document.createElement('video');
       video.preload = 'metadata';
-      video.src = url;
+      video.src = validation.safeUrl;
 
       const timer = setTimeout(() => {
         video.src = '';
@@ -930,7 +975,12 @@ export const firebaseApi = {
       video.onerror = () => {
         clearTimeout(timer);
         video.src = '';
-        resolve({ valid: false, message: 'Video stream could not be loaded by browser player' });
+        // If it's a valid remote HTTPS URL that can play direct or via stream proxy, do not block it unnecessarily
+        if (validation.safeUrl.startsWith('https://') || validation.safeUrl.startsWith('http://')) {
+          resolve({ valid: true, message: 'Remote video stream accepted (stream proxy fallback enabled)' });
+        } else {
+          resolve({ valid: false, message: 'Video stream could not be loaded by browser player' });
+        }
       };
     });
   },

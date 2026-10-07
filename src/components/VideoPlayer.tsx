@@ -9,6 +9,7 @@ import { Movie, AudioTrack, SubtitleTrack } from '../types';
 import { api } from '../services/api';
 import { AdBanner } from './AdBanner';
 import { SubtitleCue, loadSubtitles } from '../utils/vttParser';
+import { getSafeVideoUrl } from '../utils/videoUrlHelper';
 
 interface VideoPlayerProps {
   movie: Movie;
@@ -29,6 +30,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const hlsRef = useRef<Hls | null>(null);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const triedProxyRef = useRef<boolean>(false);
 
   // Playback States
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -177,11 +179,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       // Switching to a Dubbed / Alternate Audio Track:
       const track = configuredAudioTracks.find((t) => t.id === trackId);
       if (track && track.url && dubbed) {
+        const safeAudio = getSafeVideoUrl(track.url);
+        if (!safeAudio.valid) {
+          triggerToast('Alternate audio stream URL is invalid.');
+          return;
+        }
+
         // Mute video element so its native audio is silent, but video continues rolling without restarting
         video.muted = true;
 
-        // Load & synchronize alternate audio track
-        dubbed.src = track.url;
+        // Load & synchronize alternate audio track with safe URL
+        dubbed.src = safeAudio.safeUrl;
         dubbed.currentTime = video.currentTime;
         dubbed.playbackRate = video.playbackRate;
         dubbed.volume = isMuted ? 0 : volume;
@@ -224,16 +232,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setIsLoading(true);
     setHasError(false);
     setErrorMessage('');
+    triedProxyRef.current = false;
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
 
-    const src = movie.videoUrl;
-    const isHls = movie.videoType === 'hls' || src.includes('.m3u8');
+    // 1. Strict URL Safety & Scheme Validation
+    const validation = getSafeVideoUrl(movie.videoUrl);
+    if (!validation.valid) {
+      setIsLoading(false);
+      setHasError(true);
+      setErrorMessage(validation.error || 'Video URL is invalid or blocked by security check.');
+      return;
+    }
 
-    if (isHls) {
+    const safeSrc = validation.safeUrl;
+    const isHls = validation.isHls || movie.videoType === 'hls' || safeSrc.includes('.m3u8');
+
+    // 2. Playback Routing (HLS vs Direct MP4 / Blob / Firebase Storage)
+    if (isHls && !validation.isBlob) {
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
@@ -241,7 +260,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           backBufferLength: 90,
         });
         hlsRef.current = hls;
-        hls.loadSource(src);
+        hls.loadSource(safeSrc);
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -274,7 +293,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = src;
+        video.src = safeSrc;
         video.load();
       } else {
         setHasError(true);
@@ -282,7 +301,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         setIsLoading(false);
       }
     } else {
-      video.src = src;
+      // Direct MP4, WebM, Blob, or Firebase Storage HTTPS video source
+      video.src = safeSrc;
       video.load();
     }
   }, [movie.videoUrl, movie.videoType, initialTime, hasResumed]);
@@ -372,8 +392,53 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     const handleError = () => {
       setIsLoading(false);
+      const mediaErr = video.error;
+
+      const validation = getSafeVideoUrl(movie.videoUrl);
+
+      // Only attempt stream proxy for generic remote external streams (NOT local uploads, NOT blob:, NOT Firebase Storage)
+      const canAttemptProxy =
+        !validation.isBlob &&
+        !validation.isLocalUpload &&
+        !validation.isFirebaseStorage &&
+        (validation.safeUrl.startsWith('http://') || validation.safeUrl.startsWith('https://')) &&
+        !video.src.includes('/api/stream-proxy') &&
+        !triedProxyRef.current;
+
+      if (canAttemptProxy) {
+        triedProxyRef.current = true;
+        console.warn('[Z1 Movies VideoPlayer] Direct playback failed. Attempting playback via stream proxy...');
+        video.src = `/api/stream-proxy?url=${encodeURIComponent(validation.safeUrl)}`;
+        video.load();
+        video.play().then(() => setIsPlaying(true)).catch(() => {});
+        return;
+      }
+
       setHasError(true);
-      setErrorMessage('Video could not be played. Please check the network connection.');
+      let msg = 'Video could not be played. Please check the network connection.';
+      if (mediaErr) {
+        if (mediaErr.code === 1) msg = 'Video playback was aborted by the browser.';
+        else if (mediaErr.code === 2) msg = 'A network error caused the video download to fail.';
+        else if (mediaErr.code === 3) msg = 'Video playback failed due to a decoding error.';
+        else if (mediaErr.code === 4) {
+          if (validation.isBlob) {
+            msg = 'Temporary local video session has expired. Please re-upload or select a video.';
+          } else if (validation.isFirebaseStorage) {
+            msg = 'Unable to play Firebase Storage video stream. Please verify access permissions.';
+          } else {
+            msg = 'The video format or codec is not supported by your current browser.';
+          }
+        }
+
+        if (mediaErr.message) {
+          if (mediaErr.message.includes('URL safety check')) {
+            msg += ' (URL safety check rejected the media source)';
+          } else {
+            msg += ` (${mediaErr.message})`;
+          }
+        }
+      }
+      setErrorMessage(msg);
     };
 
     video.addEventListener('loadedmetadata', handleLoadedMetadata);

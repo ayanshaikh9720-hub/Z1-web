@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { Movie, AudioTrack, SubtitleTrack } from '../types';
 import { api } from '../services/api';
-import { processThumbnailFile } from '../utils/imageUtils';
+import { processThumbnailFile, normalizePosterUrl, optimizeImageFile } from '../utils/imageUtils';
 
 interface EditMovieModalProps {
   movie: Movie;
@@ -57,7 +57,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   );
 
   // Thumbnail handling
-  const [currentPosterUrl, setCurrentPosterUrl] = useState<string>(movie.posterUrl || '');
+  const [currentPosterUrl, setCurrentPosterUrl] = useState<string>(normalizePosterUrl(movie.posterUrl, movie.title));
   const [newThumbnailPreview, setNewThumbnailPreview] = useState<string | null>(null);
   const [thumbnailInputUrl, setThumbnailInputUrl] = useState<string>('');
   const [isProcessingThumbnail, setIsProcessingThumbnail] = useState<boolean>(false);
@@ -120,42 +120,48 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
     const validExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
     const lowerName = file.name.toLowerCase();
     const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
-    const hasValidMime = validFormats.includes(file.type.toLowerCase());
+    const hasValidMime = validFormats.includes(file.type.toLowerCase()) || file.type.startsWith('image/');
     if (!hasValidMime && !hasValidExt) {
       setThumbnailUploadError('Thumbnail upload failed: Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
       return;
     }
 
-    // Validate size (10 MB)
-    if (file.size > 10 * 1024 * 1024) {
-      setThumbnailUploadError('Thumbnail upload failed: Image file is too large. Maximum allowed size is 10 MB.');
-      return;
-    }
+    // Instant local preview
+    try {
+      const immediatePreview = URL.createObjectURL(file);
+      setNewThumbnailPreview(immediatePreview);
+      setThumbnailChanged(true);
+    } catch {}
 
     setSelectedThumbnailFile(file);
     setIsProcessingThumbnail(true);
-    setThumbnailUploadProgress(0);
+    setThumbnailUploadProgress(15);
     setThumbnailUploadError('');
     setThumbnailUploadSuccess('');
     setError('');
 
     try {
+      const fileToUpload = await optimizeImageFile(file);
+      setThumbnailUploadProgress(30);
+
       const downloadUrl = await api.uploadThumbnail(
-        file,
+        fileToUpload,
         movie.id,
         (pct) => {
-          setThumbnailUploadProgress(pct);
+          setThumbnailUploadProgress(Math.max(30, pct));
         },
         (task) => {
           activeThumbnailUploadTask.current = task;
         }
       );
-      setNewThumbnailPreview(downloadUrl);
+
+      const cleanUrl = normalizePosterUrl(downloadUrl, title);
+      setNewThumbnailPreview(cleanUrl);
       setThumbnailChanged(true);
       setThumbnailUploadSuccess(`New thumbnail uploaded to storage: ${file.name}`);
     } catch (err: any) {
       console.error('Thumbnail upload error in EditMovieModal:', err);
-      setThumbnailUploadError(`Thumbnail upload failed: ${err.message || 'Unknown Firebase error'}`);
+      setThumbnailUploadError(`Thumbnail upload failed: ${err.message || 'Unknown image hosting error'}`);
     } finally {
       setIsProcessingThumbnail(false);
       activeThumbnailUploadTask.current = null;
@@ -182,7 +188,8 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   // Handle Manual Thumbnail URL Apply
   const handleApplyThumbnailUrl = () => {
     if (!thumbnailInputUrl.trim()) return;
-    setNewThumbnailPreview(thumbnailInputUrl.trim());
+    const cleanUrl = normalizePosterUrl(thumbnailInputUrl.trim(), title);
+    setNewThumbnailPreview(cleanUrl);
     setThumbnailChanged(true);
     setThumbnailInputUrl('');
   };
@@ -191,7 +198,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   const handleRevertThumbnail = () => {
     setNewThumbnailPreview(null);
     setThumbnailChanged(false);
-    setCurrentPosterUrl(movie.posterUrl || '');
+    setCurrentPosterUrl(normalizePosterUrl(movie.posterUrl, movie.title));
   };
 
   // Save changes
@@ -205,6 +212,16 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
 
     if (genres.length === 0) {
       setError('Please select or specify at least one category.');
+      return;
+    }
+
+    if (isProcessingThumbnail) {
+      setError('Thumbnail is currently uploading. Please wait for upload to finish.');
+      return;
+    }
+
+    if (thumbnailChanged && newThumbnailPreview && newThumbnailPreview.startsWith('blob:')) {
+      setError('Thumbnail upload has not completed yet. Please wait for upload to finish or retry.');
       return;
     }
 
@@ -450,10 +467,13 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
               {/* Poster Preview Frame */}
               <div className="relative w-36 h-52 sm:w-40 sm:h-56 rounded-xl overflow-hidden bg-black/60 border border-slate-700 shadow-lg group">
                 <img
-                  src={activePoster || '/src/assets/images/poster_stellar_voyage_1790644925651.jpg'}
+                  src={normalizePosterUrl(activePoster, title)}
                   alt={title || 'Movie Poster'}
                   className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-300"
                   referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = '/src/assets/images/poster_stellar_voyage_1790644925651.jpg';
+                  }}
                 />
                 {isProcessingThumbnail && (
                   <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-2 text-center z-10">

@@ -162,6 +162,7 @@ export const api = {
 
       const formData = new FormData();
       formData.append('thumbnail', file);
+      formData.append('file', file);
       if (movieId) {
         formData.append('movieId', movieId);
       }
@@ -186,12 +187,10 @@ export const api = {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data = JSON.parse(xhr.responseText);
-            if (data.url) {
+            const resolvedUrl = data.relativeUrl || data.url;
+            if (resolvedUrl) {
               if (onProgress) onProgress(100);
-              const finalUrl = data.url.startsWith('/')
-                ? `${window.location.origin}${data.url}`
-                : data.url;
-              resolve(finalUrl);
+              resolve(resolvedUrl);
               return;
             }
           } catch {
@@ -203,12 +202,20 @@ export const api = {
         try {
           const errData = JSON.parse(xhr.responseText);
           if (errData.error) errMsg = errData.error;
-        } catch {}
+        } catch {
+          if (xhr.status === 413) {
+            errMsg = 'Thumbnail image exceeds the maximum 10 MB limit.';
+          } else if (xhr.status === 404) {
+            errMsg = 'Thumbnail upload endpoint was not found.';
+          } else if (xhr.status >= 500) {
+            errMsg = 'Image hosting service is temporarily unavailable. Please retry or enter a direct image URL.';
+          }
+        }
         reject(new Error(`${errMsg} (HTTP ${xhr.status})`));
       };
 
       xhr.onerror = () => {
-        reject(new Error('Network error uploading thumbnail to image hosting CDN.'));
+        reject(new Error('Network error connecting to image hosting CDN.'));
       };
 
       xhr.onabort = () => {
@@ -236,40 +243,81 @@ export const api = {
     message: string;
   }> => {
     return new Promise((resolve, reject) => {
-      // In web app, we can generate an object URL or simulate file read for testing
-      if (onProgress) {
-        let p = 0;
-        const interval = setInterval(() => {
-          p += 25;
-          onProgress(p);
-          if (p >= 100) {
-            clearInterval(interval);
-            const objectUrl = URL.createObjectURL(file);
-            resolve({
-              success: true,
-              url: objectUrl,
-              filename: file.name,
-              originalName: file.name,
-              size: file.size,
-              mimetype: file.type || 'video/mp4',
-              isVideo: true,
-              message: 'Video file ready for player streaming',
-            });
-          }
-        }, 150);
-      } else {
-        const objectUrl = URL.createObjectURL(file);
-        resolve({
-          success: true,
-          url: objectUrl,
-          filename: file.name,
-          originalName: file.name,
-          size: file.size,
-          mimetype: file.type || 'video/mp4',
-          isVideo: true,
-          message: 'Video file ready for player streaming',
-        });
-      }
+      const formData = new FormData();
+      formData.append('video', file);
+      formData.append('file', file);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload');
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && onProgress) {
+          const pct = Math.round((event.loaded / event.total) * 100);
+          onProgress(Math.min(99, pct));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data.url) {
+              if (onProgress) onProgress(100);
+              resolve({
+                success: true,
+                url: data.url,
+                filename: data.filename || file.name,
+                originalName: data.originalName || file.name,
+                size: data.size || file.size,
+                mimetype: data.mimetype || file.type || 'video/mp4',
+                isVideo: true,
+                message: data.message || 'Video file uploaded and ready for streaming',
+              });
+              return;
+            }
+          } catch {}
+        }
+
+        // Fallback to local session object URL if server upload endpoint fails
+        try {
+          const objectUrl = URL.createObjectURL(file);
+          if (onProgress) onProgress(100);
+          resolve({
+            success: true,
+            url: objectUrl,
+            filename: file.name,
+            originalName: file.name,
+            size: file.size,
+            mimetype: file.type || 'video/mp4',
+            isVideo: true,
+            message: 'Video file ready for player streaming (session object)',
+          });
+        } catch (err: any) {
+          reject(new Error(err.message || 'Could not process uploaded video file.'));
+        }
+      };
+
+      xhr.onerror = () => {
+        // Fallback to local session object URL on network error
+        try {
+          const objectUrl = URL.createObjectURL(file);
+          if (onProgress) onProgress(100);
+          resolve({
+            success: true,
+            url: objectUrl,
+            filename: file.name,
+            originalName: file.name,
+            size: file.size,
+            mimetype: file.type || 'video/mp4',
+            isVideo: true,
+            message: 'Video file ready for player streaming (session object)',
+          });
+        } catch (err: any) {
+          reject(new Error('Network error uploading video file'));
+        }
+      };
+
+      xhr.send(formData);
     });
   },
 

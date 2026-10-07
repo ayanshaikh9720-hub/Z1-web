@@ -7,6 +7,8 @@ import {
 import { Movie, AdminStats, DownloadOption, User } from '../types';
 import { api } from '../services/api';
 import { EditMovieModal } from '../components/EditMovieModal';
+import { normalizePosterUrl, optimizeImageFile } from '../utils/imageUtils';
+import { getSafeVideoUrl } from '../utils/videoUrlHelper';
 
 interface AdminPageProps {
   user: User | null;
@@ -184,48 +186,57 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     const validExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
     const lowerName = file.name.toLowerCase();
     const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
-    const hasValidMime = validTypes.includes(file.type.toLowerCase());
+    const hasValidMime = validTypes.includes(file.type.toLowerCase()) || file.type.startsWith('image/');
     if (!hasValidMime && !hasValidExt) {
       setThumbnailUploadError('Thumbnail upload failed: Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
       return;
     }
 
-    // Validate size (10 MB)
-    if (file.size > 10 * 1024 * 1024) {
-      setThumbnailUploadError('Thumbnail upload failed: Image file is too large. Maximum allowed size is 10 MB.');
-      return;
-    }
+    // Immediate local preview so the user instantly sees the poster
+    try {
+      const immediatePreview = URL.createObjectURL(file);
+      setCurrentNewMovie((prev) => prev ? {
+        ...prev,
+        posterUrl: prev.posterUrl || immediatePreview,
+        backdropUrl: prev.backdropUrl || immediatePreview,
+      } : prev);
+    } catch {}
 
     setSelectedThumbnailFile(file);
     setThumbnailUploading(true);
-    setThumbnailUploadProgress(0);
+    setThumbnailUploadProgress(10);
     setThumbnailUploadError('');
     setThumbnailUploadSuccess('');
 
     try {
+      // Automatically optimize/compress large camera images (e.g. from smartphones)
+      const fileToUpload = await optimizeImageFile(file);
+      setThumbnailUploadProgress(25);
+
       const targetMovieId = currentNewMovie?.id || `new_${Date.now()}`;
       const downloadUrl = await api.uploadThumbnail(
-        file,
+        fileToUpload,
         targetMovieId,
         (pct) => {
-          setThumbnailUploadProgress(pct);
+          setThumbnailUploadProgress(Math.max(25, pct));
         },
         (task) => {
           activeThumbnailUploadTask.current = task;
         }
       );
 
-      if (currentNewMovie) {
-        setCurrentNewMovie({
-          ...currentNewMovie,
-          posterUrl: downloadUrl,
-          backdropUrl: currentNewMovie.backdropUrl || downloadUrl,
-        });
-      }
-      setThumbnailUploadSuccess(`Thumbnail uploaded successfully: ${file.name}`);
+      const normalizedUrl = normalizePosterUrl(downloadUrl, currentNewMovie?.title);
+
+      setCurrentNewMovie((prev) => prev ? {
+        ...prev,
+        posterUrl: normalizedUrl,
+        backdropUrl: prev.backdropUrl || normalizedUrl,
+      } : prev);
+
+      setThumbnailUploadSuccess(`Thumbnail uploaded and ready: ${file.name}`);
     } catch (err: any) {
       console.error('Thumbnail upload failed in AdminPage:', err);
-      setThumbnailUploadError(`Thumbnail upload failed: ${err.message || 'Unknown Firebase error'}`);
+      setThumbnailUploadError(`Thumbnail upload failed: ${err.message || 'Unknown image hosting error'}`);
     } finally {
       setThumbnailUploading(false);
       activeThumbnailUploadTask.current = null;
@@ -312,8 +323,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({
       return;
     }
 
+    const videoValidation = getSafeVideoUrl(currentNewMovie.videoUrl);
+    if (!videoValidation.valid) {
+      setFormError(videoValidation.error || 'Please provide a valid, safe video stream URL.');
+      return;
+    }
+
+    if (thumbnailUploading) {
+      setFormError('Thumbnail is currently uploading. Please wait for upload to complete.');
+      return;
+    }
+
     if (!currentNewMovie.posterUrl || !currentNewMovie.posterUrl.trim()) {
       setFormError('Movie Thumbnail / Poster is required. Please upload a poster before publishing.');
+      return;
+    }
+
+    if (currentNewMovie.posterUrl.startsWith('blob:')) {
+      setFormError('Thumbnail upload has not completed yet. Please wait for upload to finish or retry.');
       return;
     }
 
@@ -323,6 +350,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     try {
       const moviePayload: Partial<Movie> = {
         ...currentNewMovie,
+        videoUrl: videoValidation.safeUrl,
         backdropUrl: currentNewMovie.backdropUrl || currentNewMovie.posterUrl,
       };
 
@@ -536,10 +564,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-3">
                         <img
-                          src={movie.posterUrl}
+                          src={normalizePosterUrl(movie.posterUrl, movie.title)}
                           alt={movie.title}
                           className="w-10 h-14 object-cover rounded bg-slate-800 shrink-0"
                           referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).src = '/src/assets/images/poster_stellar_voyage_1790644925651.jpg';
+                          }}
                         />
                         <div className="min-w-0">
                           <div className="font-bold text-slate-100 truncate text-sm">
@@ -821,10 +852,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                       {currentNewMovie.posterUrl ? (
                         <>
                           <img
-                            src={currentNewMovie.posterUrl}
+                            src={normalizePosterUrl(currentNewMovie.posterUrl, currentNewMovie.title)}
                             alt="Selected Movie Poster Preview"
                             className="w-full h-full object-cover rounded-lg"
                             referrerPolicy="no-referrer"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).src = '/src/assets/images/poster_stellar_voyage_1790644925651.jpg';
+                            }}
                           />
                           <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2 p-2">
                             <button
@@ -971,11 +1005,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                         <input
                           type="text"
                           value={currentNewMovie.posterUrl || ''}
-                          onChange={(e) => setCurrentNewMovie({
-                            ...currentNewMovie,
-                            posterUrl: e.target.value,
-                            backdropUrl: currentNewMovie.backdropUrl || e.target.value,
-                          })}
+                          onChange={(e) => {
+                            const clean = normalizePosterUrl(e.target.value.trim(), currentNewMovie?.title);
+                            setCurrentNewMovie({
+                              ...currentNewMovie,
+                              posterUrl: clean,
+                              backdropUrl: currentNewMovie?.backdropUrl || clean,
+                            });
+                          }}
                           placeholder="https://.../poster.jpg"
                           className="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs font-mono text-slate-200"
                         />
