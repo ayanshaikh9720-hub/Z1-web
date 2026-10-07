@@ -134,14 +134,94 @@ export const api = {
     return { success: true, message: 'Database reset to licensed sample library' };
   },
 
-  // Thumbnail / Poster Upload handler (Firebase Storage)
-  uploadThumbnail: async (
+  // Thumbnail / Poster Upload handler (Separate Image Hosting / CDN - Spark plan safe)
+  uploadThumbnail: (
     file: File,
     movieId?: string,
     onProgress?: (pct: number) => void,
     onTaskCreated?: (task: any) => void
   ): Promise<string> => {
-    return firebaseApi.uploadThumbnail(file, movieId, onProgress, onTaskCreated);
+    return new Promise((resolve, reject) => {
+      // 1. Client-side format validation
+      const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+      const validExts = ['.jpg', '.jpeg', '.png', '.webp'];
+      const lower = file.name.toLowerCase();
+      const hasValidExt = validExts.some((ext) => lower.endsWith(ext));
+      const hasValidMime = validTypes.includes(file.type.toLowerCase());
+
+      if (!hasValidMime && !hasValidExt) {
+        reject(new Error('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.'));
+        return;
+      }
+
+      // 2. Size validation (Max 10 MB)
+      if (file.size > 10 * 1024 * 1024) {
+        reject(new Error('Image file is too large. Maximum allowed size is 10 MB.'));
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('thumbnail', file);
+      if (movieId) {
+        formData.append('movieId', movieId);
+      }
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload-thumbnail');
+
+      if (onTaskCreated) {
+        onTaskCreated({
+          cancel: () => xhr.abort(),
+        });
+      }
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && onProgress) {
+          const pct = Math.round((event.loaded / event.total) * 100);
+          onProgress(Math.min(99, Math.max(0, pct)));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data.url) {
+              if (onProgress) onProgress(100);
+              const finalUrl = data.url.startsWith('/')
+                ? `${window.location.origin}${data.url}`
+                : data.url;
+              resolve(finalUrl);
+              return;
+            }
+          } catch {
+            // parse error
+          }
+        }
+
+        let errMsg = 'Image hosting service failed to upload thumbnail.';
+        try {
+          const errData = JSON.parse(xhr.responseText);
+          if (errData.error) errMsg = errData.error;
+        } catch {}
+        reject(new Error(`${errMsg} (HTTP ${xhr.status})`));
+      };
+
+      xhr.onerror = () => {
+        reject(new Error('Network error uploading thumbnail to image hosting CDN.'));
+      };
+
+      xhr.onabort = () => {
+        reject(new Error('Thumbnail upload was canceled.'));
+      };
+
+      xhr.timeout = 35000;
+      xhr.ontimeout = () => {
+        reject(new Error('Thumbnail upload timed out (35s).'));
+      };
+
+      xhr.send(formData);
+    });
   },
 
   // Local/Direct File Upload handler

@@ -798,7 +798,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                       <span className="text-red-500 text-xs font-semibold">* Required</span>
                     </h4>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Upload a poster image. It will be uploaded to Firebase Storage and displayed across Home, Catalog, and Search cards.
+                      Upload a poster image. It will be hosted on the image CDN and displayed across Home, Catalog, and Search cards.
                     </p>
                   </div>
                   {currentNewMovie.posterUrl ? (
@@ -852,7 +852,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                       {thumbnailUploading && (
                         <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-3 text-center z-10">
                           <div className="w-8 h-8 border-3 border-red-500 border-t-transparent rounded-full animate-spin mb-2" />
-                          <span className="text-xs text-white font-semibold">Uploading to Storage...</span>
+                          <span className="text-xs text-white font-semibold">Uploading to image CDN...</span>
                           <span className="text-xs font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
                         </div>
                       )}
@@ -880,7 +880,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                         </span>
                       </div>
                       <p className="text-xs text-slate-400 leading-relaxed">
-                        Select a high-resolution poster. The file is uploaded separately to Firebase Storage, keeping the video file unchanged.
+                        Select a high-resolution poster. The file is uploaded separately to the image CDN, keeping the video file unchanged.
                       </p>
 
                       <div className="flex flex-wrap items-center gap-2.5 pt-1">
@@ -921,7 +921,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                     {thumbnailUploading && (
                       <div className="space-y-1.5 p-3 bg-black/40 rounded-xl border border-slate-800">
                         <div className="flex justify-between text-xs text-slate-300">
-                          <span>Uploading thumbnail to Firebase Storage...</span>
+                          <span>Uploading thumbnail to image CDN...</span>
                           <span className="font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
                         </div>
                         <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">

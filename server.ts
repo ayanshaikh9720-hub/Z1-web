@@ -8,9 +8,13 @@ import app from './src/server/app';
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
+const THUMBNAILS_DIR = path.resolve(UPLOADS_DIR, 'thumbnails');
 
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+if (!fs.existsSync(THUMBNAILS_DIR)) {
+  fs.mkdirSync(THUMBNAILS_DIR, { recursive: true });
 }
 
 // Multer storage setup for local/server direct uploads
@@ -30,6 +34,36 @@ const upload = multer({
   storage,
   limits: {
     fileSize: 1024 * 1024 * 500, // 500MB
+  },
+});
+
+// Dedicated thumbnail storage (Max 10MB, JPG/PNG/WebP)
+const thumbnailStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, THUMBNAILS_DIR);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+    const safeBase = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const uniqueSuffix = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    cb(null, `poster_${safeBase}_${uniqueSuffix}${ext}`);
+  },
+});
+
+const uploadThumbnail = multer({
+  storage: thumbnailStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+  },
+  fileFilter: (_req, file, cb) => {
+    const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+    const validExts = ['.jpg', '.jpeg', '.png', '.webp'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (validMimes.includes(file.mimetype) || validExts.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.'));
+    }
   },
 });
 
@@ -84,7 +118,26 @@ app.get('/uploads/:filename', (req: Request, res: Response) => {
   }
 });
 
-// Upload endpoint
+// Static route for thumbnail images
+app.get('/uploads/thumbnails/:filename', (req: Request, res: Response) => {
+  const filePath = path.join(THUMBNAILS_DIR, req.params.filename);
+  if (!fs.existsSync(filePath)) {
+    res.status(404).send('Thumbnail not found');
+    return;
+  }
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeTypes: Record<string, string> = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+  };
+  res.setHeader('Content-Type', mimeTypes[ext] || 'image/jpeg');
+  res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+  fs.createReadStream(filePath).pipe(res);
+});
+
+// Video upload endpoint
 app.post('/api/upload', upload.single('video'), (req: Request, res: Response) => {
   if (!req.file) {
     res.status(400).json({ error: 'No file received in upload payload' });
@@ -103,6 +156,30 @@ app.post('/api/upload', upload.single('video'), (req: Request, res: Response) =>
     mimetype: req.file.mimetype,
     isVideo: !!isVideo,
     message: 'File successfully stored and ready for playback',
+  });
+});
+
+// Dedicated Thumbnail upload endpoint (Standalone Image Hosting / CDN)
+app.post('/api/upload-thumbnail', uploadThumbnail.single('thumbnail'), (req: Request, res: Response) => {
+  if (!req.file) {
+    res.status(400).json({ error: 'No image file uploaded' });
+    return;
+  }
+
+  const forwardedHost = (req.headers['x-forwarded-host'] as string) || req.get('host') || 'localhost:3000';
+  const forwardedProto = (req.headers['x-forwarded-proto'] as string) || (req.secure ? 'https' : 'http');
+  const protocol = (forwardedHost.includes('run.app') || forwardedHost.includes('vercel.app')) ? 'https' : forwardedProto;
+  
+  const publicUrl = `${protocol}://${forwardedHost}/uploads/thumbnails/${req.file.filename}`;
+
+  res.json({
+    success: true,
+    url: publicUrl,
+    filename: req.file.filename,
+    originalName: req.file.originalname,
+    size: req.file.size,
+    mimetype: req.file.mimetype,
+    message: 'Thumbnail uploaded and hosted successfully on CDN',
   });
 });
 

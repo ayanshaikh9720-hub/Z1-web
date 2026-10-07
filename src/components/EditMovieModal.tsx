@@ -458,7 +458,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                 {isProcessingThumbnail && (
                   <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-2 text-center z-10">
                     <div className="w-7 h-7 border-2 border-red-500 border-t-transparent rounded-full animate-spin mb-1.5" />
-                    <span className="text-[11px] text-white font-semibold">Uploading to Storage...</span>
+                    <span className="text-[11px] text-white font-semibold">Uploading to image CDN...</span>
                     <span className="text-xs font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
                   </div>
                 )}
@@ -498,7 +498,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                 {isProcessingThumbnail && (
                   <div className="w-full space-y-1 p-2 bg-black/40 rounded-xl border border-slate-800">
                     <div className="flex justify-between text-[10px] text-slate-300">
-                      <span>Uploading to Firebase Storage...</span>
+                      <span>Uploading to image CDN...</span>
                       <span className="font-mono font-bold text-red-400">{thumbnailUploadProgress}%</span>
                     </div>
                     <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">

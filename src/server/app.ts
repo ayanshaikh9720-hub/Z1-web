@@ -4,17 +4,45 @@ import fs from 'fs';
 import crypto from 'crypto';
 import http from 'http';
 import https from 'https';
+import multer from 'multer';
 import { loadDB, saveDB, getInitialSeedData, authenticateUser, generateToken, verifyToken, TokenPayload } from './db';
 
 const app = express();
 
 const IS_VERCEL = Boolean(process.env.VERCEL);
 const UPLOADS_DIR = IS_VERCEL ? '/tmp/uploads' : path.resolve(process.cwd(), 'uploads');
+const THUMBNAILS_DIR = path.resolve(UPLOADS_DIR, 'thumbnails');
+
 if (!fs.existsSync(UPLOADS_DIR)) {
   try {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   } catch {}
 }
+if (!fs.existsSync(THUMBNAILS_DIR)) {
+  try {
+    fs.mkdirSync(THUMBNAILS_DIR, { recursive: true });
+  } catch {}
+}
+
+// Multer for thumbnails
+const thumbnailStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, THUMBNAILS_DIR);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+    const safeBase = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const uniqueSuffix = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    cb(null, `poster_${safeBase}_${uniqueSuffix}${ext}`);
+  },
+});
+
+const uploadThumbnail = multer({
+  storage: thumbnailStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+});
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -667,6 +695,49 @@ apiRouter.post('/contact', (req: Request, res: Response) => {
   saveDB(db);
 
   res.json({ success: true, message: 'Your message has been received by the Z1 Movies team.' });
+});
+
+// 17. Thumbnail Upload (Separate Image Hosting / CDN)
+apiRouter.post('/upload-thumbnail', uploadThumbnail.single('thumbnail'), (req: Request, res: Response) => {
+  if (!req.file) {
+    res.status(400).json({ error: 'No thumbnail image uploaded' });
+    return;
+  }
+
+  const forwardedHost = (req.headers['x-forwarded-host'] as string) || req.get('host') || 'localhost:3000';
+  const forwardedProto = (req.headers['x-forwarded-proto'] as string) || (req.secure ? 'https' : 'http');
+  const protocol = (forwardedHost.includes('run.app') || forwardedHost.includes('vercel.app')) ? 'https' : forwardedProto;
+  
+  const publicUrl = `${protocol}://${forwardedHost}/uploads/thumbnails/${req.file.filename}`;
+
+  res.json({
+    success: true,
+    url: publicUrl,
+    filename: req.file.filename,
+    originalName: req.file.originalname,
+    size: req.file.size,
+    mimetype: req.file.mimetype,
+    message: 'Thumbnail uploaded and hosted on image CDN',
+  });
+});
+
+// Static route for thumbnail images on app
+app.get('/uploads/thumbnails/:filename', (req: Request, res: Response) => {
+  const filePath = path.join(THUMBNAILS_DIR, req.params.filename);
+  if (!fs.existsSync(filePath)) {
+    res.status(404).send('Thumbnail not found');
+    return;
+  }
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeTypes: Record<string, string> = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+  };
+  res.setHeader('Content-Type', mimeTypes[ext] || 'image/jpeg');
+  res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+  fs.createReadStream(filePath).pipe(res);
 });
 
 // Mount router on BOTH '/api' and '/'

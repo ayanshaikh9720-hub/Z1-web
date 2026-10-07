@@ -570,7 +570,7 @@ export const firebaseApi = {
     throw new Error('Authorized download unavailable for this title');
   },
 
-  // Upload Thumbnail to Firebase Storage using resumable uploadBytesResumable
+  // Upload Thumbnail to Image Hosting CDN (Spark Plan Safe - No Firebase Storage / Blaze needed)
   uploadThumbnail: async (
     file: File,
     movieId?: string,
@@ -594,115 +594,68 @@ export const firebaseApi = {
       throw new Error('Image file is too large. Maximum allowed size is 10 MB.');
     }
 
-    // 3. Target path: movie-thumbnails/{movieId}/{uniqueFileName}
-    const cleanMovieId = (movieId || `new_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '_');
-    const cleanFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-    const uniqueFileName = `${Date.now()}_${cleanFileName}`;
-    const storagePath = `movie-thumbnails/${cleanMovieId}/${uniqueFileName}`;
-    const fileRef = storageRef(storage, storagePath);
-
-    const metadata = {
-      contentType: file.type || 'image/jpeg',
-      customMetadata: {
-        movieId: cleanMovieId,
-        originalName: file.name,
-        uploadedAt: new Date().toISOString(),
-      },
-    };
-
-    // 4. Create resumable upload task
-    const uploadTask = uploadBytesResumable(fileRef, file, metadata);
-    if (onTaskCreated) {
-      onTaskCreated(uploadTask);
+    const formData = new FormData();
+    formData.append('thumbnail', file);
+    if (movieId) {
+      formData.append('movieId', movieId);
     }
 
     return new Promise<string>((resolve, reject) => {
-      let isSettled = false;
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload-thumbnail');
 
-      // Fail-safe timeout to prevent hanging at 0% if connection stalls
-      const hangTimeout = setTimeout(() => {
-        if (!isSettled) {
-          isSettled = true;
+      if (onTaskCreated) {
+        onTaskCreated({
+          cancel: () => xhr.abort(),
+        });
+      }
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && onProgress) {
+          const pct = Math.round((event.loaded / event.total) * 100);
+          onProgress(Math.min(99, Math.max(0, pct)));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
           try {
-            uploadTask.cancel();
+            const data = JSON.parse(xhr.responseText);
+            if (data.url) {
+              if (onProgress) onProgress(100);
+              const finalUrl = data.url.startsWith('/')
+                ? `${window.location.origin}${data.url}`
+                : data.url;
+              resolve(finalUrl);
+              return;
+            }
           } catch {
-            // ignore
-          }
-          reject(
-            new Error(
-              'Upload timed out. Firebase Storage did not respond. Please check network connection and Firebase Storage permissions.'
-            )
-          );
-        }
-      }, 35000);
-
-      uploadTask.on(
-        'state_changed',
-        (snapshot) => {
-          if (snapshot.totalBytes > 0) {
-            const progress = Math.round(
-              (snapshot.bytesTransferred / snapshot.totalBytes) * 100
-            );
-            const clamped = Math.max(0, Math.min(100, progress));
-            if (onProgress) {
-              onProgress(clamped);
-            }
-          }
-        },
-        (error: any) => {
-          if (isSettled) return;
-          isSettled = true;
-          clearTimeout(hangTimeout);
-
-          console.error('Firebase Storage upload error:', error);
-
-          let userMessage = error?.message || 'Storage upload error occurred';
-          if (error?.code) {
-            switch (error.code) {
-              case 'storage/unauthorized':
-                userMessage =
-                  'Firebase Storage permission denied (storage/unauthorized). Please verify your Admin login and Storage security rules.';
-                break;
-              case 'storage/canceled':
-                userMessage = 'Upload was canceled.';
-                break;
-              case 'storage/retry-limit-exceeded':
-                userMessage = 'Upload timed out. Firebase Storage could not be reached.';
-                break;
-              case 'storage/bucket-not-found':
-                userMessage = `Firebase Storage bucket not found: ${firebaseConfig.storageBucket || 'check storageBucket in configuration'}.`;
-                break;
-              case 'storage/quota-exceeded':
-                userMessage = 'Firebase Storage quota exceeded for this project.';
-                break;
-              case 'storage/unknown':
-                userMessage = `Storage error (${error.serverResponse || error.message || 'unknown error'})`;
-                break;
-              default:
-                userMessage = `[${error.code}] ${error.message}`;
-            }
-          }
-          reject(new Error(userMessage));
-        },
-        async () => {
-          if (isSettled) return;
-          isSettled = true;
-          clearTimeout(hangTimeout);
-
-          try {
-            if (onProgress) onProgress(100);
-            const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
-            resolve(downloadUrl);
-          } catch (err: any) {
-            console.error('Error retrieving download URL after upload:', err);
-            reject(
-              new Error(
-                err?.message || 'Failed to retrieve download URL from Firebase Storage.'
-              )
-            );
+            // parse error
           }
         }
-      );
+
+        let errMsg = 'Image hosting service failed to upload thumbnail.';
+        try {
+          const errData = JSON.parse(xhr.responseText);
+          if (errData.error) errMsg = errData.error;
+        } catch {}
+        reject(new Error(`${errMsg} (HTTP ${xhr.status})`));
+      };
+
+      xhr.onerror = () => {
+        reject(new Error('Network error uploading thumbnail to image hosting CDN.'));
+      };
+
+      xhr.onabort = () => {
+        reject(new Error('Thumbnail upload was canceled.'));
+      };
+
+      xhr.timeout = 35000;
+      xhr.ontimeout = () => {
+        reject(new Error('Thumbnail upload timed out (35s).'));
+      };
+
+      xhr.send(formData);
     });
   },
 
