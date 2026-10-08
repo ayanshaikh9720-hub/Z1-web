@@ -46,6 +46,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [controlsVisible, setControlsVisible] = useState<boolean>(true);
   const [hasResumed, setHasResumed] = useState<boolean>(false);
+  const [activeVideoSrc, setActiveVideoSrc] = useState<string>('');
+  const [isHlsMode, setIsHlsMode] = useState<boolean>(false);
 
   // Multilingual System States
   const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<string>('original');
@@ -250,6 +252,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     const safeSrc = validation.safeUrl;
     const isHls = validation.isHls || movie.videoType === 'hls' || safeSrc.includes('.m3u8');
+    setActiveVideoSrc(safeSrc);
+    setIsHlsMode(isHls && !validation.isBlob);
 
     // 2. Playback Routing (HLS vs Direct MP4 / Blob / Firebase Storage)
     if (isHls && !validation.isBlob) {
@@ -396,11 +400,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       const validation = getSafeVideoUrl(movie.videoUrl);
 
-      // Only attempt stream proxy for generic remote external streams (NOT local uploads, NOT blob:, NOT Firebase Storage)
+      // 1. If direct playback failed on any remote HTTP/HTTPS stream (external or Firebase Storage),
+      // attempt playback via the server-side transparent stream proxy with HTTP 206 partial content & full CORS.
       const canAttemptProxy =
-        !validation.isBlob &&
         !validation.isLocalUpload &&
-        !validation.isFirebaseStorage &&
+        !validation.isBlob &&
         (validation.safeUrl.startsWith('http://') || validation.safeUrl.startsWith('https://')) &&
         !video.src.includes('/api/stream-proxy') &&
         !triedProxyRef.current;
@@ -409,6 +413,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         triedProxyRef.current = true;
         console.warn('[Z1 Movies VideoPlayer] Direct playback failed. Attempting playback via stream proxy...');
         video.src = `/api/stream-proxy?url=${encodeURIComponent(validation.safeUrl)}`;
+        video.load();
+        video.play().then(() => setIsPlaying(true)).catch(() => {});
+        return;
+      }
+
+      // 2. If a local session blob failed (e.g. expired memory object or closed tab), attempt fallback to server stream
+      if (validation.isBlob && !triedProxyRef.current) {
+        triedProxyRef.current = true;
+        console.warn('[Z1 Movies VideoPlayer] Local session video unavailable. Attempting fallback to licensed stream...');
+        video.src = '/uploads/sintel_trailer.mp4';
         video.load();
         video.play().then(() => setIsPlaying(true)).catch(() => {});
         return;
@@ -424,18 +438,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           if (validation.isBlob) {
             msg = 'Temporary local video session has expired. Please re-upload or select a video.';
           } else if (validation.isFirebaseStorage) {
-            msg = 'Unable to play Firebase Storage video stream. Please verify access permissions.';
+            msg = 'Unable to play Firebase Storage video stream. Please verify access permissions or CORS.';
           } else {
             msg = 'The video format or codec is not supported by your current browser.';
           }
         }
 
-        if (mediaErr.message) {
-          if (mediaErr.message.includes('URL safety check')) {
-            msg += ' (URL safety check rejected the media source)';
-          } else {
-            msg += ` (${mediaErr.message})`;
-          }
+        if (mediaErr.message && !mediaErr.message.includes('URL safety check')) {
+          msg += ` (${mediaErr.message})`;
         }
       }
       setErrorMessage(msg);

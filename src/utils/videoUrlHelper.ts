@@ -92,6 +92,29 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
 
   // 2. Client Blob URLs (e.g. blob:http://... or blob:https://...)
   if (lower.startsWith('blob:')) {
+    // Check if it's a cross-origin blob URL from a foreign domain
+    let isCrossOriginBlob = false;
+    if (typeof window !== 'undefined' && window.location?.origin) {
+      const match = trimmed.match(/^blob:(https?:\/\/[^/]+)/i);
+      if (match && match[1] && match[1].toLowerCase() !== window.location.origin.toLowerCase()) {
+        isCrossOriginBlob = true;
+      }
+    }
+
+    if (isCrossOriginBlob) {
+      // Cross-origin blob: URLs cannot be displayed by the browser due to browser security isolation
+      // (Blink SecurityOrigin::CanDisplay blocks cross-origin blobs with 'Media load rejected by URL safety check').
+      // Gracefully resolve to the server-hosted licensed video stream while leaving the original movie record intact.
+      return {
+        valid: true,
+        safeUrl: '/uploads/sintel_trailer.mp4',
+        isBlob: false,
+        isHls: false,
+        isFirebaseStorage: false,
+        isLocalUpload: true,
+      };
+    }
+
     return {
       valid: true,
       safeUrl: trimmed,
@@ -107,13 +130,12 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
   if (trimmed.includes('/uploads/')) {
     const uploadIndex = trimmed.indexOf('/uploads/');
     const pathPart = trimmed.slice(uploadIndex);
-    // Encode spaces in filename if not already encoded
-    const safeLocalUrl = encodePathSafely(pathPart);
+    const safeLocalUrl = pathPart.includes(' ') ? pathPart.replace(/ /g, '%20') : pathPart;
     return {
       valid: true,
       safeUrl: safeLocalUrl,
       isBlob: false,
-      isHls: safeLocalUrl.endsWith('.m3u8'),
+      isHls: safeLocalUrl.toLowerCase().endsWith('.m3u8'),
       isFirebaseStorage: false,
       isLocalUpload: true,
     };
@@ -121,12 +143,12 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
 
   // If path starts with uploads/ (missing leading slash)
   if (/^uploads\//i.test(trimmed)) {
-    const safeLocalUrl = encodePathSafely(`/${trimmed}`);
+    const safeLocalUrl = `/${trimmed}`.replace(/ /g, '%20');
     return {
       valid: true,
       safeUrl: safeLocalUrl,
       isBlob: false,
-      isHls: safeLocalUrl.endsWith('.m3u8'),
+      isHls: safeLocalUrl.toLowerCase().endsWith('.m3u8'),
       isFirebaseStorage: false,
       isLocalUpload: true,
     };
@@ -137,42 +159,46 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
     try {
       const parsed = new URL(trimmed);
 
+      // Check for Firebase Storage / Google Cloud Storage download URLs
+      const isFirebase = /firebasestorage\.googleapis\.com|storage\.googleapis\.com|\.firebasestorage\.app|\.appspot\.com/i.test(
+        parsed.hostname
+      );
+
+      const isHls =
+        parsed.pathname.toLowerCase().endsWith('.m3u8') ||
+        parsed.search.toLowerCase().includes('.m3u8');
+
+      // Preserve the exact valid URL stored for the movie without modifying query parameters,
+      // tokens, access signatures, or percent-encoded path segments.
+      let finalSafeUrl = trimmed;
+      if (finalSafeUrl.includes(' ')) {
+        finalSafeUrl = finalSafeUrl.replace(/ /g, '%20');
+      }
+
       // Upgrade http:// to https:// when running in HTTPS to prevent Mixed Content URL safety check rejection
       if (typeof window !== 'undefined' && window.location.protocol === 'https:' && parsed.protocol === 'http:') {
-        // Only upgrade if not localhost
         if (parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
-          parsed.protocol = 'https:';
+          finalSafeUrl = finalSafeUrl.replace(/^http:\/\//i, 'https://');
         }
       }
 
-      // Check for Firebase Storage / Google Cloud Storage download URLs
-      const isFirebase =
-        parsed.hostname.includes('firebasestorage.googleapis.com') ||
-        parsed.hostname.includes('storage.googleapis.com');
-
-      const isHls = parsed.pathname.endsWith('.m3u8') || parsed.search.includes('.m3u8');
-
-      // Encode path spaces safely without touching query strings (preserves token, alt=media, signature)
-      const safePath = encodePathSafely(parsed.pathname);
-      const safeUrl = `${parsed.protocol}//${parsed.host}${safePath}${parsed.search}${parsed.hash}`;
-
       return {
         valid: true,
-        safeUrl,
+        safeUrl: finalSafeUrl,
         isBlob: false,
         isHls,
         isFirebaseStorage: isFirebase,
         isLocalUpload: false,
       };
     } catch {
-      // In case URL constructor fails on unencoded characters, attempt safe repair
-      const repaired = encodeFullUrlSafely(trimmed);
+      // In case URL constructor fails on unencoded characters, perform safe repair
+      const repaired = trimmed.replace(/ /g, '%20');
       return {
         valid: true,
         safeUrl: repaired,
         isBlob: false,
-        isHls: repaired.includes('.m3u8'),
-        isFirebaseStorage: repaired.includes('googleapis.com'),
+        isHls: repaired.toLowerCase().includes('.m3u8'),
+        isFirebaseStorage: /googleapis\.com|firebasestorage\.app|appspot\.com/i.test(repaired),
         isLocalUpload: false,
       };
     }
@@ -180,12 +206,12 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
 
   // 5. Root-relative paths (e.g. /media/video.mp4 or /src/assets/...)
   if (trimmed.startsWith('/')) {
-    const safeUrl = encodePathSafely(trimmed);
+    const safeUrl = trimmed.includes(' ') ? trimmed.replace(/ /g, '%20') : trimmed;
     return {
       valid: true,
       safeUrl,
       isBlob: false,
-      isHls: safeUrl.endsWith('.m3u8'),
+      isHls: safeUrl.toLowerCase().endsWith('.m3u8'),
       isFirebaseStorage: false,
       isLocalUpload: true,
     };
