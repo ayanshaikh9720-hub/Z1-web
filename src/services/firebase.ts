@@ -117,8 +117,8 @@ export const SEED_MOVIES: Omit<Movie, 'id'>[] = [
   {
     title: 'Tears of Steel',
     description: 'Set in a dystopian future Amsterdam, a squad of dedicated researchers and soldiers struggle to save humanity by confronting the machines with an emotional past connection.',
-    posterUrl: '/src/assets/images/poster_stellar_voyage_1790644925651.jpg',
-    backdropUrl: '/src/assets/images/hero_cinema_backdrop_1790644911552.jpg',
+    posterUrl: '/images/poster_stellar_voyage_1790644925651.jpg',
+    backdropUrl: '/images/hero_cinema_backdrop_1790644911552.jpg',
     videoUrl: 'https://archive.org/download/Tears-of-Steel/tears_of_steel_720p.mp4',
     videoType: 'mp4',
     downloadUrls: [
@@ -188,8 +188,8 @@ export const SEED_MOVIES: Omit<Movie, 'id'>[] = [
   {
     title: 'Desert Dawn: Nomads of Time',
     description: 'Across the shifting dunes of an ancient forgotten desert, an archaeologist uncovers a pre-solar monument that bends the perception of time.',
-    posterUrl: '/src/assets/images/poster_desert_dawn_1790644949151.jpg',
-    backdropUrl: '/src/assets/images/poster_desert_dawn_1790644949151.jpg',
+    posterUrl: '/images/poster_desert_dawn_1790644949151.jpg',
+    backdropUrl: '/images/poster_desert_dawn_1790644949151.jpg',
     videoUrl: 'https://media.w3.org/2010/05/sintel/trailer.mp4',
     videoType: 'mp4',
     downloadUrls: [
@@ -226,8 +226,8 @@ export const SEED_MOVIES: Omit<Movie, 'id'>[] = [
   {
     title: 'Sintel: The Dragon Quest',
     description: 'A lonely young warrior girl travels across treacherous peaks and barren wastelands searching for a baby dragon she nursed to health.',
-    posterUrl: '/src/assets/images/poster_stellar_voyage_1790644925651.jpg',
-    backdropUrl: '/src/assets/images/hero_cinema_backdrop_1790644911552.jpg',
+    posterUrl: '/images/poster_stellar_voyage_1790644925651.jpg',
+    backdropUrl: '/images/hero_cinema_backdrop_1790644911552.jpg',
     videoUrl: 'https://archive.org/download/Sintel/sintel-2048-surround.mp4',
     videoType: 'mp4',
     downloadUrls: [
@@ -264,8 +264,8 @@ export const SEED_MOVIES: Omit<Movie, 'id'>[] = [
   {
     title: 'Big Buck Bunny & The Forest Rebels',
     description: 'A benevolent giant rabbit with a gentle heart is pushed to his limits when three bullying woodland critters terrorize innocent forest creatures.',
-    posterUrl: '/src/assets/images/poster_shadow_runner_1790644939411.jpg',
-    backdropUrl: '/src/assets/images/hero_cinema_backdrop_1790644911552.jpg',
+    posterUrl: '/images/poster_shadow_runner_1790644939411.jpg',
+    backdropUrl: '/images/hero_cinema_backdrop_1790644911552.jpg',
     videoUrl: 'https://archive.org/download/BigBuckBunny_124/Content/big_buck_bunny_720p_surround.mp4',
     videoType: 'mp4',
     downloadUrls: [
@@ -302,8 +302,8 @@ export const SEED_MOVIES: Omit<Movie, 'id'>[] = [
   {
     title: 'Elephants Dream: The Machine Core',
     description: 'Two explorers wander inside an infinite mechanical labyrinth that responds to emotional tension and shifting perceptions of reality.',
-    posterUrl: '/src/assets/images/poster_desert_dawn_1790644949151.jpg',
-    backdropUrl: '/src/assets/images/hero_cinema_backdrop_1790644911552.jpg',
+    posterUrl: '/images/poster_desert_dawn_1790644949151.jpg',
+    backdropUrl: '/images/hero_cinema_backdrop_1790644911552.jpg',
     videoUrl: 'https://archive.org/download/ElephantsDream/ed_1024_512kb.mp4',
     videoType: 'mp4',
     downloadUrls: [
@@ -333,8 +333,8 @@ export const SEED_MOVIES: Omit<Movie, 'id'>[] = [
   {
     title: 'Aurora Borealis: Live Stream Feed (HLS)',
     description: 'Adaptive Bitrate live HLS streaming test broadcast capturing pristine northern light phenomena across high Arctic latitudes.',
-    posterUrl: '/src/assets/images/poster_stellar_voyage_1790644925651.jpg',
-    backdropUrl: '/src/assets/images/hero_cinema_backdrop_1790644911552.jpg',
+    posterUrl: '/images/poster_stellar_voyage_1790644925651.jpg',
+    backdropUrl: '/images/hero_cinema_backdrop_1790644911552.jpg',
     videoUrl: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
     videoType: 'hls',
     downloadUrls: [],
@@ -433,11 +433,14 @@ export const firebaseApi = {
   getMovies: async (params?: {
     search?: string;
     genre?: string;
+    language?: string;
     trending?: boolean;
     featured?: boolean;
     published?: boolean;
-    sort?: 'newest' | 'views' | 'downloads' | 'rating';
-  }): Promise<{ movies: Movie[]; total: number }> => {
+    sort?: 'newest' | 'views' | 'downloads' | 'rating' | 'year' | 'title';
+    page?: number;
+    pageSize?: number;
+  }): Promise<{ movies: Movie[]; total: number; hasMore?: boolean; page?: number; totalPages?: number }> => {
     try {
       const isAdmin = isUserAdmin(auth.currentUser?.email);
       let movieQuery;
@@ -459,7 +462,9 @@ export const firebaseApi = {
         list = SEED_MOVIES.map((m, i) => ({ ...m, id: `seed_${i}` }));
       }
 
-      if (params?.published !== undefined) {
+      if (isAdmin && params?.published === undefined) {
+        // Admin viewing all movies: do not filter by published status
+      } else if (params?.published !== undefined) {
         list = list.filter((m) => m.published === params.published);
       } else {
         list = list.filter((m) => m.published);
@@ -495,17 +500,44 @@ export const firebaseApi = {
         });
       }
 
+      if (params?.language && params.language !== 'All') {
+        const langTarget = params.language.toLowerCase();
+        list = list.filter((m) => m.language && m.language.toLowerCase().includes(langTarget));
+      }
+
       if (params?.sort === 'views') {
         list.sort((a, b) => (b.views || 0) - (a.views || 0));
       } else if (params?.sort === 'downloads') {
         list.sort((a, b) => (b.downloads || 0) - (a.downloads || 0));
       } else if (params?.sort === 'rating') {
         list.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+      } else if (params?.sort === 'year') {
+        list.sort((a, b) => (b.releaseYear || 0) - (a.releaseYear || 0));
+      } else if (params?.sort === 'title') {
+        list.sort((a, b) => a.title.localeCompare(b.title));
       } else {
         list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       }
 
-      return { movies: list, total: list.length };
+      const total = list.length;
+      let paginated = list;
+      let hasMore = false;
+      const page = params?.page || 1;
+      const pageSize = params?.pageSize;
+
+      if (pageSize && pageSize > 0) {
+        const start = (page - 1) * pageSize;
+        paginated = list.slice(start, start + pageSize);
+        hasMore = start + pageSize < total;
+      }
+
+      return {
+        movies: paginated,
+        total,
+        hasMore,
+        page,
+        totalPages: pageSize ? Math.ceil(total / pageSize) : 1,
+      };
     } catch (err: any) {
       if (err?.message?.includes('insufficient permissions')) {
         handleFirestoreError(err, OperationType.LIST, 'movies');

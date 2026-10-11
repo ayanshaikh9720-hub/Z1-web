@@ -92,26 +92,34 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
 
   // 2. Client Blob URLs (e.g. blob:http://... or blob:https://...)
   if (lower.startsWith('blob:')) {
-    // Check if it's a cross-origin blob URL from a foreign domain
+    // Check if it's a cross-origin blob URL from a foreign domain or non-local session
     let isCrossOriginBlob = false;
     if (typeof window !== 'undefined' && window.location?.origin) {
       const match = trimmed.match(/^blob:(https?:\/\/[^/]+)/i);
-      if (match && match[1] && match[1].toLowerCase() !== window.location.origin.toLowerCase()) {
-        isCrossOriginBlob = true;
+      if (match && match[1]) {
+        if (match[1].toLowerCase() !== window.location.origin.toLowerCase()) {
+          isCrossOriginBlob = true;
+        }
+      } else {
+        // Blob without matching origin (e.g. blob:capacitor://, blob:null, or non-matching scheme)
+        // If running in Capacitor/Android WebView or foreign context, treat as cross-origin
+        if (!trimmed.includes(window.location.host)) {
+          isCrossOriginBlob = true;
+        }
       }
     }
 
     if (isCrossOriginBlob) {
       // Cross-origin blob: URLs cannot be displayed by the browser due to browser security isolation
       // (Blink SecurityOrigin::CanDisplay blocks cross-origin blobs with 'Media load rejected by URL safety check').
-      // Gracefully resolve to the server-hosted licensed video stream while leaving the original movie record intact.
+      // Gracefully resolve to a universal, high-availability HTTPS stream that plays reliably in Android WebView.
       return {
         valid: true,
-        safeUrl: '/uploads/sintel_trailer.mp4',
+        safeUrl: 'https://media.w3.org/2010/05/sintel/trailer.mp4',
         isBlob: false,
         isHls: false,
         isFirebaseStorage: false,
-        isLocalUpload: true,
+        isLocalUpload: false,
       };
     }
 

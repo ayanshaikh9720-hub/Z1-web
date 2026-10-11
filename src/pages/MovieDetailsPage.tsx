@@ -3,6 +3,7 @@ import { ArrowLeft, Play, Download, Bookmark, Check, Star, ShieldCheck, Film, Al
 import { Movie, User, DownloadOption } from '../types';
 import { api } from '../services/api';
 import { AdBanner } from '../components/AdBanner';
+import { normalizePosterUrl, DEFAULT_POSTER_FALLBACK } from '../utils/imageUtils';
 
 interface MovieDetailsPageProps {
   movie: Movie;
@@ -97,9 +98,12 @@ export const MovieDetailsPage: React.FC<MovieDetailsPageProps> = ({
       {/* Backdrop Header */}
       <div className="relative w-full h-[340px] sm:h-[460px] lg:h-[540px] overflow-hidden">
         <img
-          src={movie.backdropUrl || movie.posterUrl}
+          src={normalizePosterUrl(movie.backdropUrl || movie.posterUrl, movie.title)}
           alt={movie.title}
           referrerPolicy="no-referrer"
+          onError={(e) => {
+            (e.target as HTMLImageElement).src = DEFAULT_POSTER_FALLBACK;
+          }}
           className="w-full h-full object-cover object-center filter brightness-[0.55]"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-[#08090d] via-[#08090d]/60 to-transparent" />
@@ -124,12 +128,18 @@ export const MovieDetailsPage: React.FC<MovieDetailsPageProps> = ({
           {/* Poster Column */}
           <div className="md:col-span-4 lg:col-span-3">
             <div className="relative aspect-[2/3] w-full max-w-[260px] mx-auto md:max-w-none rounded-2xl overflow-hidden bg-slate-900 border-2 border-slate-700/80 shadow-2xl">
-              {!imageError && movie.posterUrl ? (
+              {!imageError ? (
                 <img
-                  src={movie.posterUrl}
+                  src={normalizePosterUrl(movie.posterUrl, movie.title)}
                   alt={movie.title}
                   referrerPolicy="no-referrer"
-                  onError={() => setImageError(true)}
+                  onError={(e) => {
+                    if ((e.target as HTMLImageElement).src !== DEFAULT_POSTER_FALLBACK) {
+                      (e.target as HTMLImageElement).src = DEFAULT_POSTER_FALLBACK;
+                    } else {
+                      setImageError(true);
+                    }
+                  }}
                   className="w-full h-full object-cover"
                 />
               ) : (

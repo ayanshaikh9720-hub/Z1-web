@@ -2,12 +2,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Film, Users, Eye, Download, Plus, Edit2, Trash2, CheckCircle2, XCircle,
   AlertTriangle, UploadCloud, RefreshCw, Star, Flame, Check, ExternalLink,
-  Shield, Filter, ArrowUpDown, Play, Image as ImageIcon
+  Shield, Filter, ArrowUpDown, Play, Image as ImageIcon, MoreVertical,
+  Upload, EyeOff
 } from 'lucide-react';
 import { Movie, AdminStats, DownloadOption, User } from '../types';
 import { api } from '../services/api';
 import { EditMovieModal } from '../components/EditMovieModal';
-import { normalizePosterUrl, optimizeImageFile } from '../utils/imageUtils';
+import { normalizePosterUrl, optimizeImageFile, DEFAULT_POSTER_FALLBACK } from '../utils/imageUtils';
 import { getSafeVideoUrl } from '../utils/videoUrlHelper';
 
 interface AdminPageProps {
@@ -36,6 +37,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({
   // Dedicated Edit Movie modal state
   const [editModalOpen, setEditModalOpen] = useState<boolean>(false);
   const [movieToEdit, setMovieToEdit] = useState<Movie | null>(null);
+  const [editSectionFocus, setEditSectionFocus] = useState<'general' | 'thumbnail' | 'video'>('general');
+
+  // Actions menu state (tracks which movie row dropdown is currently open)
+  const [activeMenuMovieId, setActiveMenuMovieId] = useState<string | null>(null);
+
+  // Safe Delete confirmation modal state
+  const [safeDeleteTarget, setSafeDeleteTarget] = useState<Movie | null>(null);
+  const [deleteInProgress, setDeleteInProgress] = useState<boolean>(false);
+
+  // In-app notifications
+  const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const triggerNotification = (message: string, type: 'success' | 'error' = 'success') => {
+    setNotification({ message, type });
+    setTimeout(() => {
+      setNotification((curr) => (curr?.message === message ? null : curr));
+    }, 4500);
+  };
 
   // Add New Movie modal state
   const [newMovieModalOpen, setNewMovieModalOpen] = useState<boolean>(false);
@@ -95,34 +114,80 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     loadAdminData();
   }, []);
 
+  // Close actions dropdown menu on outside click
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('.admin-actions-menu')) {
+        setActiveMenuMovieId(null);
+      }
+    };
+    document.addEventListener('click', handleOutsideClick);
+    return () => document.removeEventListener('click', handleOutsideClick);
+  }, []);
+
   const handleTogglePublish = async (movie: Movie) => {
     try {
       const updated = await api.togglePublish(movie.id, !movie.published);
       setMovies((prev) => prev.map((m) => (m.id === movie.id ? updated.movie : m)));
-      // Refresh stats
       api.getAdminStats().then(setStats).catch(() => {});
       if (onMovieUpdated) {
         onMovieUpdated(updated.movie);
       }
+      triggerNotification(
+        `"${movie.title}" is now ${updated.movie.published ? 'Published (Live)' : 'Unpublished (Draft)'}.`
+      );
     } catch (err: any) {
-      alert(`Publish toggle failed: ${err.message}`);
+      triggerNotification(`Publish toggle failed: ${err.message}`, 'error');
     }
   };
 
-  const handleDeleteMovie = async (movieId: string, title: string) => {
-    if (!window.confirm(`Are you sure you want to permanently delete "${title}"?`)) return;
+  const handleToggleFeatured = async (movie: Movie) => {
     try {
-      await api.deleteMovie(movieId);
-      setMovies((prev) => prev.filter((m) => m.id !== movieId));
+      const nextFeatured = !movie.featured;
+      const res = await api.updateMovie(movie.id, {
+        ...movie,
+        featured: nextFeatured,
+        updatedAt: new Date().toISOString(),
+      });
+      setMovies((prev) => prev.map((m) => (m.id === movie.id ? res.movie : m)));
       api.getAdminStats().then(setStats).catch(() => {});
+      if (onMovieUpdated) {
+        onMovieUpdated(res.movie);
+      }
+      triggerNotification(
+        `"${movie.title}" ${nextFeatured ? 'added to Featured Showcase' : 'removed from Featured'}.`
+      );
     } catch (err: any) {
-      alert(`Failed to delete movie: ${err.message}`);
+      triggerNotification(`Failed to update featured status: ${err.message}`, 'error');
     }
   };
 
-  // Open Edit Movie Modal for existing movie
-  const handleOpenEditModal = (movie: Movie) => {
+  const handleStartDelete = (movie: Movie) => {
+    setActiveMenuMovieId(null);
+    setSafeDeleteTarget(movie);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!safeDeleteTarget) return;
+    setDeleteInProgress(true);
+    try {
+      await api.deleteMovie(safeDeleteTarget.id);
+      setMovies((prev) => prev.filter((m) => m.id !== safeDeleteTarget.id));
+      api.getAdminStats().then(setStats).catch(() => {});
+      triggerNotification(`Movie "${safeDeleteTarget.title}" was safely deleted.`);
+      setSafeDeleteTarget(null);
+    } catch (err: any) {
+      triggerNotification(`Failed to delete movie: ${err.message}`, 'error');
+    } finally {
+      setDeleteInProgress(false);
+    }
+  };
+
+  // Open Edit Movie Modal for existing movie with targeted section
+  const handleOpenEditModal = (movie: Movie, section: 'general' | 'thumbnail' | 'video' = 'general') => {
+    setActiveMenuMovieId(null);
     setMovieToEdit(movie);
+    setEditSectionFocus(section);
     setEditModalOpen(true);
   };
 
@@ -134,6 +199,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     if (onMovieUpdated) {
       onMovieUpdated(res.movie);
     }
+    triggerNotification(`Saved changes to "${res.movie.title}".`);
   };
 
   const openNewMovieModal = () => {
@@ -427,13 +493,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         <div className="flex items-center gap-3">
           <button
             onClick={() => {
-              if (window.confirm('Reset database to initial licensed Creative Commons sample library?')) {
-                api.resetDemoData().then(() => loadAdminData());
-              }
+              loadAdminData();
+              triggerNotification('Movie library and real statistics refreshed.');
             }}
-            className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
+            title="Refresh movie library and statistics"
           >
-            Reset Demo Library
+            <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
+            <span>Refresh List</span>
           </button>
 
           <button
@@ -445,6 +512,32 @@ export const AdminPage: React.FC<AdminPageProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Global Notification Banner */}
+      {notification && (
+        <div
+          className={`p-3.5 rounded-xl border flex items-center justify-between text-xs font-medium transition-all ${
+            notification.type === 'success'
+              ? 'bg-emerald-950/70 border-emerald-800 text-emerald-200'
+              : 'bg-red-950/70 border-red-800 text-red-200'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {notification.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            )}
+            <span>{notification.message}</span>
+          </div>
+          <button
+            onClick={() => setNotification(null)}
+            className="text-slate-400 hover:text-white p-1"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Real Statistics Grid */}
       {stats && (
@@ -569,7 +662,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                           className="w-10 h-14 object-cover rounded bg-slate-800 shrink-0"
                           referrerPolicy="no-referrer"
                           onError={(e) => {
-                            (e.target as HTMLImageElement).src = '/src/assets/images/poster_stellar_voyage_1790644925651.jpg';
+                            (e.target as HTMLImageElement).src = DEFAULT_POSTER_FALLBACK;
                           }}
                         />
                         <div className="min-w-0">
@@ -636,6 +729,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
 
                     <td className="py-3 px-4 text-right">
                       <div className="flex items-center justify-end gap-2">
+                        {/* Play Test Stream */}
                         <button
                           onClick={() => onPlayMovie(movie)}
                           className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-300 hover:text-white transition-colors"
@@ -643,21 +737,117 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                         >
                           <Play className="w-3.5 h-3.5 fill-current" />
                         </button>
-                        <button
-                          onClick={() => handleOpenEditModal(movie)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-750 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 hover:border-slate-600 transition-colors shadow-sm"
-                          title="Edit Movie Metadata & Thumbnail"
-                        >
-                          <Edit2 className="w-3.5 h-3.5 text-red-400" />
-                          <span>Edit</span>
-                        </button>
-                        <button
-                          onClick={() => handleDeleteMovie(movie.id, movie.title)}
-                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-300 hover:text-white transition-colors"
-                          title="Delete Movie"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+
+                        {/* Clearly Visible Actions Menu */}
+                        <div className="relative inline-block text-left admin-actions-menu">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveMenuMovieId(activeMenuMovieId === movie.id ? null : movie.id);
+                            }}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                              activeMenuMovieId === movie.id
+                                ? 'bg-red-600 text-white border-red-500 shadow-md'
+                                : 'bg-slate-800 hover:bg-slate-700 active:bg-slate-750 text-slate-200 hover:text-white border-slate-700 hover:border-slate-600'
+                            }`}
+                            aria-label={`Actions for ${movie.title}`}
+                          >
+                            <span>Actions</span>
+                            <MoreVertical className="w-3.5 h-3.5 opacity-80" />
+                          </button>
+
+                          {activeMenuMovieId === movie.id && (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="absolute right-0 mt-1.5 w-56 rounded-xl bg-[#0e111a] border border-slate-700 shadow-2xl py-1.5 z-40 divide-y divide-slate-800/80 animate-in fade-in zoom-in-95 duration-100"
+                            >
+                              <div className="px-3 py-1.5">
+                                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                                  Movie Actions
+                                </div>
+                                <div className="text-xs font-semibold text-slate-200 truncate">
+                                  {movie.title}
+                                </div>
+                              </div>
+
+                              <div className="py-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditModal(movie, 'general')}
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5 text-red-400" />
+                                  <span>Edit Movie</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditModal(movie, 'thumbnail')}
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                >
+                                  <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>Change Thumbnail</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditModal(movie, 'video')}
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                >
+                                  <Upload className="w-3.5 h-3.5 text-sky-400" />
+                                  <span>Replace Video</span>
+                                </button>
+                              </div>
+
+                              <div className="py-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveMenuMovieId(null);
+                                    handleTogglePublish(movie);
+                                  }}
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                >
+                                  {movie.published ? (
+                                    <>
+                                      <EyeOff className="w-3.5 h-3.5 text-amber-400" />
+                                      <span>Unpublish (Make Draft)</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                                      <span>Publish (Make Live)</span>
+                                    </>
+                                  )}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveMenuMovieId(null);
+                                    handleToggleFeatured(movie);
+                                  }}
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                >
+                                  <Star className={`w-3.5 h-3.5 ${movie.featured ? 'text-slate-400' : 'text-amber-400 fill-amber-400'}`} />
+                                  <span>{movie.featured ? 'Remove from Featured' : 'Add to Featured'}</span>
+                                </button>
+                              </div>
+
+                              <div className="py-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartDelete(movie)}
+                                  className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-red-950/40 hover:text-red-300 flex items-center gap-2.5 transition-colors font-medium"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                                  <span>Delete Movie</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </td>
                   </tr>
@@ -673,12 +863,74 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         <EditMovieModal
           movie={movieToEdit}
           isOpen={editModalOpen}
+          initialSection={editSectionFocus}
           onClose={() => {
             setEditModalOpen(false);
             setMovieToEdit(null);
           }}
           onSave={handleSaveEditedMovie}
         />
+      )}
+
+      {/* Safe Delete Confirmation Dialog */}
+      {safeDeleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+          <div className="relative w-full max-w-md bg-[#0e111a] border border-slate-800 rounded-2xl shadow-2xl p-6 text-slate-100 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-red-950/60 border border-red-800/80 rounded-xl text-red-400">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="font-display text-lg font-bold text-white">
+                  Delete Movie
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Safe deletion confirmation
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-xl text-xs space-y-2">
+              <div className="text-slate-300">
+                Are you sure you want to delete <span className="font-bold text-white">"{safeDeleteTarget.title}"</span>?
+              </div>
+              <ul className="text-[11px] text-slate-400 space-y-1 list-disc list-inside">
+                <li>Only this single movie record will be deleted.</li>
+                <li>Other movies, user accounts, and database records remain safe.</li>
+                <li>Shared storage assets or referenced files will not be deleted.</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setSafeDeleteTarget(null)}
+                disabled={deleteInProgress}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl border border-slate-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={deleteInProgress}
+                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-lg shadow-red-950/50 transition-colors"
+              >
+                {deleteInProgress ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deleting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Movie</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Add New Movie Modal with Video Upload & Probe */}
@@ -857,7 +1109,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                             className="w-full h-full object-cover rounded-lg"
                             referrerPolicy="no-referrer"
                             onError={(e) => {
-                              (e.target as HTMLImageElement).src = '/src/assets/images/poster_stellar_voyage_1790644925651.jpg';
+                              (e.target as HTMLImageElement).src = DEFAULT_POSTER_FALLBACK;
                             }}
                           />
                           <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2 p-2">

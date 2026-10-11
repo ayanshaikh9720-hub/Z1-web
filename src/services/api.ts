@@ -82,10 +82,13 @@ export const api = {
   getMovies: (params?: {
     search?: string;
     genre?: string;
+    language?: string;
     trending?: boolean;
     featured?: boolean;
     published?: boolean;
-    sort?: 'newest' | 'views' | 'downloads' | 'rating';
+    sort?: 'newest' | 'views' | 'downloads' | 'rating' | 'year' | 'title';
+    page?: number;
+    pageSize?: number;
   }) => {
     return firebaseApi.getMovies(params);
   },

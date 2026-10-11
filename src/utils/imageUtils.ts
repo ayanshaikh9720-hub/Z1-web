@@ -5,14 +5,15 @@ const KNOWN_IMDB_CDN_MAP: Record<string, string> = {
   tt32474264: 'https://m.media-amazon.com/images/M/MV5BM2Q3NzY4MGQtYzMwMy00YTg2LWI1MGItYjU4ODI5YTNhYmFlXkEyXkFqcGc@._V1_.jpg',
 };
 
-export const DEFAULT_POSTER_FALLBACK = '/src/assets/images/poster_stellar_voyage_1790644925651.jpg';
+export const DEFAULT_POSTER_FALLBACK = '/images/poster_stellar_voyage_1790644925651.jpg';
 
 /**
  * Normalizes any poster URL to guarantee it renders as a valid image:
  * 1. Resolves IMDb mediaviewer webpage links (which return HTML and fail in <img>) to real Amazon CDN image URLs.
  * 2. Normalizes foreign domain uploads (e.g. ais-dev-.../uploads/thumbnails) to root-relative paths (/uploads/thumbnails/...)
  *    so they never get blocked by cross-origin cookie checks.
- * 3. Preserves valid HTTPS image URLs and local asset paths.
+ * 3. Normalizes legacy /src/assets/images/ paths to public /images/ paths for production build compatibility.
+ * 4. Preserves valid HTTPS image URLs and local asset paths.
  */
 export function normalizePosterUrl(url?: string | null, title?: string): string {
   if (!url || typeof url !== 'string' || !url.trim()) {
@@ -35,20 +36,25 @@ export function normalizePosterUrl(url?: string | null, title?: string): string 
     }
   }
 
-  // 3. Normalize foreign domain uploaded thumbnail URLs to root-relative paths
+  // 3. Normalize legacy source asset paths /src/assets/images/ -> /images/
+  if (clean.includes('/src/assets/images/')) {
+    return clean.replace(/.*\/src\/assets\/images\//, '/images/');
+  }
+
+  // 4. Normalize foreign domain uploaded thumbnail URLs to root-relative paths
   // E.g. https://ais-dev-.../uploads/thumbnails/poster.jpg -> /uploads/thumbnails/poster.jpg
   if (clean.includes('/uploads/thumbnails/')) {
     const idx = clean.indexOf('/uploads/thumbnails/');
     return clean.slice(idx);
   }
 
-  // 4. Normalize foreign domain uploaded video URLs to root-relative paths
+  // 5. Normalize foreign domain uploaded video URLs to root-relative paths
   if (clean.includes('/uploads/') && !clean.startsWith('/uploads/')) {
     const idx = clean.indexOf('/uploads/');
     return clean.slice(idx);
   }
 
-  // 5. If it's an IMDb mediaviewer webpage link without known mapping, use fallback
+  // 6. If it's an IMDb mediaviewer webpage link without known mapping, use fallback
   if (clean.includes('imdb.com/title/') && clean.includes('mediaviewer')) {
     return DEFAULT_POSTER_FALLBACK;
   }

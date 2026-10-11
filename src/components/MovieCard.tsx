@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Play, Star, Clock } from 'lucide-react';
 import { Movie, PlaybackProgress } from '../types';
+import { normalizePosterUrl, DEFAULT_POSTER_FALLBACK } from '../utils/imageUtils';
 
 interface MovieCardProps {
   movie: Movie;
@@ -16,6 +17,7 @@ export const MovieCard: React.FC<MovieCardProps> = ({
   onPlayDirect,
 }) => {
   const [imageError, setImageError] = useState(false);
+  const posterSrc = normalizePosterUrl(movie.posterUrl, movie.title);
 
   // Quality badge determination
   const has4K = movie.downloadUrls?.some((d) => d.quality === '4K');
@@ -38,13 +40,19 @@ export const MovieCard: React.FC<MovieCardProps> = ({
     >
       {/* Poster Container */}
       <div className="relative aspect-[2/3] w-full rounded-xl overflow-hidden bg-slate-900 border border-slate-800/80 shadow-md group-hover:border-slate-700 group-hover:shadow-red-950/20">
-        {!imageError && movie.posterUrl ? (
+        {!imageError && posterSrc ? (
           <img
-            src={movie.posterUrl}
+            src={posterSrc}
             alt={movie.title}
             loading="lazy"
             referrerPolicy="no-referrer"
-            onError={() => setImageError(true)}
+            onError={(e) => {
+              if ((e.target as HTMLImageElement).src !== DEFAULT_POSTER_FALLBACK) {
+                (e.target as HTMLImageElement).src = DEFAULT_POSTER_FALLBACK;
+              } else {
+                setImageError(true);
+              }
+            }}
             className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
           />
         ) : (

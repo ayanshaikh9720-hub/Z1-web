@@ -4,6 +4,7 @@ import { Movie, PlaybackProgress, User } from '../types';
 import { api } from '../services/api';
 import { MovieCarousel } from '../components/MovieCarousel';
 import { AdBanner } from '../components/AdBanner';
+import { normalizePosterUrl, DEFAULT_POSTER_FALLBACK } from '../utils/imageUtils';
 
 interface HomePageProps {
   onSelectMovie: (movie: Movie) => void;
@@ -151,10 +152,13 @@ export const HomePage: React.FC<HomePageProps> = ({
           {/* Backdrop Image with Scrim */}
           <div className="absolute inset-0 z-0">
             <img
-              src={heroMovie.backdropUrl || heroMovie.posterUrl}
+              src={normalizePosterUrl(heroMovie.backdropUrl || heroMovie.posterUrl, heroMovie.title)}
               alt={heroMovie.title}
               className="w-full h-full object-cover object-center filter brightness-[0.7]"
               referrerPolicy="no-referrer"
+              onError={(e) => {
+                (e.target as HTMLImageElement).src = DEFAULT_POSTER_FALLBACK;
+              }}
             />
             {/* Measured Scrim for WCAG AA readability */}
             <div className="absolute inset-0 bg-gradient-to-t from-[#08090d] via-[#08090d]/60 to-transparent" />

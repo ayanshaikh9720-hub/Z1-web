@@ -6,13 +6,14 @@ import {
 } from 'lucide-react';
 import { Movie, AudioTrack, SubtitleTrack } from '../types';
 import { api } from '../services/api';
-import { processThumbnailFile, normalizePosterUrl, optimizeImageFile } from '../utils/imageUtils';
+import { processThumbnailFile, normalizePosterUrl, optimizeImageFile, DEFAULT_POSTER_FALLBACK } from '../utils/imageUtils';
 
 interface EditMovieModalProps {
   movie: Movie;
   isOpen: boolean;
   onClose: () => void;
   onSave: (updatedMovie: Movie) => Promise<void>;
+  initialSection?: 'general' | 'thumbnail' | 'video';
 }
 
 const COMMON_CATEGORIES = [
@@ -31,7 +32,23 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  initialSection = 'general',
 }) => {
+  useEffect(() => {
+    if (!isOpen) return;
+    if (initialSection === 'thumbnail') {
+      setTimeout(() => {
+        const el = document.getElementById('thumbnail-section');
+        el?.scrollIntoView({ behavior: 'smooth' });
+      }, 150);
+    } else if (initialSection === 'video') {
+      setTimeout(() => {
+        const el = document.getElementById('video-section');
+        el?.scrollIntoView({ behavior: 'smooth' });
+      }, 150);
+    }
+  }, [isOpen, initialSection]);
+
   // Form fields
   const [title, setTitle] = useState<string>(movie.title || '');
   const [description, setDescription] = useState<string>(movie.description || '');
@@ -69,6 +86,52 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
 
   // Active task ref for cleanup
   const activeThumbnailUploadTask = useRef<any>(null);
+
+  // Video Source handling
+  const [videoUrl, setVideoUrl] = useState<string>(movie.videoUrl || '');
+  const [videoType, setVideoType] = useState<'mp4' | 'hls' | 'webm'>(movie.videoType || 'mp4');
+  const [isVideoUploading, setIsVideoUploading] = useState<boolean>(false);
+  const [videoUploadProgress, setVideoUploadProgress] = useState<number>(0);
+  const [videoUploadSuccess, setVideoUploadSuccess] = useState<string>('');
+  const [videoUploadError, setVideoUploadError] = useState<string>('');
+  const [probeResult, setProbeResult] = useState<{ valid: boolean; message: string; contentType?: string } | null>(null);
+  const [probeLoading, setProbeLoading] = useState<boolean>(false);
+  const videoFileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleVideoFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsVideoUploading(true);
+    setVideoUploadProgress(0);
+    setVideoUploadError('');
+    setVideoUploadSuccess('');
+
+    try {
+      const res = await api.uploadFile(file, (pct) => setVideoUploadProgress(pct));
+      setVideoUploadSuccess(`Video uploaded: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB)`);
+      setVideoUrl(res.url);
+      setVideoType(res.url.endsWith('.m3u8') ? 'hls' : 'mp4');
+    } catch (err: any) {
+      setVideoUploadError(err.message || 'Video upload failed.');
+    } finally {
+      setIsVideoUploading(false);
+    }
+  };
+
+  const handleVerifyVideoUrl = async () => {
+    if (!videoUrl.trim()) return;
+    setProbeLoading(true);
+    setProbeResult(null);
+    try {
+      const res = await api.validateVideoUrl(videoUrl.trim());
+      setProbeResult(res);
+    } catch (err: any) {
+      setProbeResult({ valid: false, message: err.message || 'Stream verification failed' });
+    } finally {
+      setProbeLoading(false);
+    }
+  };
 
   useEffect(() => {
     return () => {
@@ -257,9 +320,8 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
         posterUrl: finalPosterUrl,
         audioTracks: audioTracks.filter((t) => t.language && t.url),
         subtitleTracks: subtitleTracks.filter((s) => s.language && s.src),
-        // Existing video files and downloads are strictly locked & preserved:
-        videoUrl: movie.videoUrl,
-        videoType: movie.videoType,
+        videoUrl: videoUrl.trim() || movie.videoUrl,
+        videoType: (videoUrl.trim() || movie.videoUrl).endsWith('.m3u8') ? 'hls' : videoType,
         downloadUrls: movie.downloadUrls || [],
         updatedAt: new Date().toISOString(),
       };
@@ -447,7 +509,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
             </div>
 
             {/* Right 1 Col: Thumbnail / Poster Upload & Change Thumbnail */}
-            <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col items-center text-center space-y-3">
+            <div id="thumbnail-section" className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col items-center text-center space-y-3">
               <div className="w-full flex items-center justify-between text-xs font-semibold text-slate-300">
                 <span className="flex items-center gap-1.5">
                   <ImageIcon className="w-4 h-4 text-red-500" />
@@ -472,7 +534,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                   className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-300"
                   referrerPolicy="no-referrer"
                   onError={(e) => {
-                    (e.target as HTMLImageElement).src = '/src/assets/images/poster_stellar_voyage_1790644925651.jpg';
+                    (e.target as HTMLImageElement).src = DEFAULT_POSTER_FALLBACK;
                   }}
                 />
                 {isProcessingThumbnail && (
@@ -1091,17 +1153,112 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
             </div>
           </div>
 
-          {/* Locked Video File Indicator */}
-          <div className="p-3 bg-black/40 border border-slate-800 rounded-xl flex items-center justify-between text-xs text-slate-400">
-            <div className="flex items-center gap-2 truncate">
-              <Lock className="w-4 h-4 text-slate-500 shrink-0" />
-              <span className="truncate">
-                Stream File: <code className="text-slate-300 font-mono text-[11px]">{movie.videoUrl}</code>
+          {/* Video Source & Replace Video Controls */}
+          <div id="video-section" className="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl space-y-3.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Film className="w-4 h-4 text-red-500" />
+                <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                  Video Source & Streaming Link
+                </h4>
+              </div>
+              <span className="text-[10px] text-slate-400">
+                Supports HTTPS Firebase Storage, signed links, HLS & MP4
               </span>
             </div>
-            <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-400 shrink-0">
-              Unmodified
-            </span>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold text-slate-300">
+                Stream / Master Video URL
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={videoUrl}
+                  onChange={(e) => {
+                    setVideoUrl(e.target.value);
+                    setProbeResult(null);
+                  }}
+                  placeholder="https://firebasestorage.googleapis.com/... or /uploads/..."
+                  className="flex-1 bg-black/50 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-slate-600 focus:outline-none focus:border-red-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleVerifyVideoUrl}
+                  disabled={probeLoading || !videoUrl.trim()}
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition-colors shrink-0"
+                >
+                  {probeLoading ? 'Probing...' : 'Verify Stream'}
+                </button>
+              </div>
+
+              {probeResult && (
+                <div
+                  className={`p-2.5 rounded-xl border text-xs flex items-center gap-2 ${
+                    probeResult.valid
+                      ? 'bg-emerald-950/40 border-emerald-800 text-emerald-300'
+                      : 'bg-red-950/40 border-red-800 text-red-300'
+                  }`}
+                >
+                  {probeResult.valid ? <Check className="w-3.5 h-3.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+                  <span>{probeResult.message}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Replace Video File Uploader */}
+            <div className="pt-2 border-t border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-xs text-slate-400">
+                Need to replace the video with a new master file?
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  ref={videoFileInputRef}
+                  type="file"
+                  accept="video/mp4,video/webm,video/quicktime,video/x-matroska,.m3u8"
+                  onChange={handleVideoFileUpload}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => videoFileInputRef.current?.click()}
+                  disabled={isVideoUploading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-850 text-slate-200 hover:text-white text-xs font-semibold rounded-xl border border-slate-700 transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5 text-red-400" />
+                  <span>{isVideoUploading ? 'Uploading Video...' : 'Replace Video File'}</span>
+                </button>
+              </div>
+            </div>
+
+            {isVideoUploading && (
+              <div className="space-y-1 pt-1">
+                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <span>Uploading replacement video...</span>
+                  <span className="font-mono">{videoUploadProgress}%</span>
+                </div>
+                <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-red-600 transition-all duration-200"
+                    style={{ width: `${videoUploadProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {videoUploadSuccess && (
+              <div className="p-2.5 bg-emerald-950/40 border border-emerald-800 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 shrink-0" />
+                <span>{videoUploadSuccess}</span>
+              </div>
+            )}
+
+            {videoUploadError && (
+              <div className="p-2.5 bg-red-950/40 border border-red-800 rounded-xl text-xs text-red-300 flex items-center gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>{videoUploadError}</span>
+              </div>
+            )}
           </div>
 
           {/* Modal Footer Actions */}

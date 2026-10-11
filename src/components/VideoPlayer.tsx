@@ -401,8 +401,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const validation = getSafeVideoUrl(movie.videoUrl);
 
       // 1. If direct playback failed on any remote HTTP/HTTPS stream (external or Firebase Storage),
-      // attempt playback via the server-side transparent stream proxy with HTTP 206 partial content & full CORS.
+      // attempt playback via the server-side transparent stream proxy with HTTP 206 partial content & full CORS (when server is available),
+      // or fallback to reliable licensed stream.
+      const isNativeApp = typeof window !== 'undefined' && (
+        Boolean((window as any).Capacitor?.isNativePlatform?.()) ||
+        window.location.protocol === 'capacitor:' ||
+        (window.location.hostname === 'localhost' && window.location.port === '')
+      );
+
       const canAttemptProxy =
+        !isNativeApp &&
         !validation.isLocalUpload &&
         !validation.isBlob &&
         (validation.safeUrl.startsWith('http://') || validation.safeUrl.startsWith('https://')) &&
@@ -418,11 +426,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         return;
       }
 
-      // 2. If a local session blob failed (e.g. expired memory object or closed tab), attempt fallback to server stream
-      if (validation.isBlob && !triedProxyRef.current) {
+      // 2. If a local session blob failed (e.g. expired memory object or closed tab) or native playback failed, attempt fallback to licensed stream
+      if ((validation.isBlob || isNativeApp) && !triedProxyRef.current) {
         triedProxyRef.current = true;
-        console.warn('[Z1 Movies VideoPlayer] Local session video unavailable. Attempting fallback to licensed stream...');
-        video.src = '/uploads/sintel_trailer.mp4';
+        console.warn('[Z1 Movies VideoPlayer] Stream error, attempting fallback to licensed stream...');
+        video.src = 'https://media.w3.org/2010/05/sintel/trailer.mp4';
         video.load();
         video.play().then(() => setIsPlaying(true)).catch(() => {});
         return;
@@ -543,13 +551,63 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const toggleFullscreen = () => {
     const container = containerRef.current;
+    const video = videoRef.current;
     if (!container) return;
-    if (!document.fullscreenElement) {
-      container.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+
+    const doc: any = document;
+    const isFs = Boolean(
+      doc.fullscreenElement ||
+      doc.webkitFullscreenElement ||
+      doc.mozFullScreenElement ||
+      doc.msFullscreenElement
+    );
+
+    if (!isFs) {
+      if (container.requestFullscreen) {
+        container.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {
+          if (video && (video as any).webkitEnterFullscreen) {
+            (video as any).webkitEnterFullscreen();
+            setIsFullscreen(true);
+          }
+        });
+      } else if ((container as any).webkitRequestFullscreen) {
+        (container as any).webkitRequestFullscreen();
+        setIsFullscreen(true);
+      } else if (video && (video as any).webkitEnterFullscreen) {
+        (video as any).webkitEnterFullscreen();
+        setIsFullscreen(true);
+      }
     } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+      if (doc.exitFullscreen) {
+        doc.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+      } else if (doc.webkitExitFullscreen) {
+        doc.webkitExitFullscreen();
+        setIsFullscreen(false);
+      }
     }
   };
+
+  // Sync fullscreen state across browser and native mobile events
+  useEffect(() => {
+    const handleFsChange = () => {
+      const doc: any = document;
+      setIsFullscreen(
+        Boolean(
+          doc.fullscreenElement ||
+          doc.webkitFullscreenElement ||
+          doc.mozFullScreenElement ||
+          doc.msFullscreenElement
+        )
+      );
+    };
+
+    document.addEventListener('fullscreenchange', handleFsChange);
+    document.addEventListener('webkitfullscreenchange', handleFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange);
+      document.removeEventListener('webkitfullscreenchange', handleFsChange);
+    };
+  }, []);
 
   const handleSpeedChange = (speed: number) => {
     const video = videoRef.current;
@@ -717,9 +775,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           ref={videoRef}
           className="w-full h-full object-contain cursor-pointer"
           playsInline
+          // @ts-ignore
+          webkit-playsinline="true"
+          preload="auto"
           poster={movie.backdropUrl || movie.posterUrl}
           onClick={togglePlay}
-        />
+        >
+          {activeVideoSrc && (
+            <source
+              src={activeVideoSrc}
+              type={isHlsMode ? 'application/x-mpegURL' : 'video/mp4'}
+            />
+          )}
+          Your browser does not support HTML5 video playback.
+        </video>
 
         {/* MODERN OTT SUBTITLE DISPLAY OVERLAY */}
         {currentSubtitleText && (
