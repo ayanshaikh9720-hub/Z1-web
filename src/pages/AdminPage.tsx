@@ -303,6 +303,15 @@ export const AdminPage: React.FC<AdminPageProps> = ({
       setThumbnailUploadSuccess(`Thumbnail uploaded and ready: ${file.name}`);
     } catch (err: any) {
       console.error('Thumbnail upload failed in AdminPage:', err);
+      setCurrentNewMovie((prev) =>
+        prev
+          ? {
+              ...prev,
+              posterUrl: prev.posterUrl?.startsWith('blob:') ? '' : prev.posterUrl,
+              backdropUrl: prev.backdropUrl?.startsWith('blob:') ? '' : prev.backdropUrl,
+            }
+          : prev
+      );
       setThumbnailUploadError(`Thumbnail upload failed: ${err.message || 'Unknown image hosting error'}`);
     } finally {
       setThumbnailUploading(false);

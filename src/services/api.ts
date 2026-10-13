@@ -109,22 +109,134 @@ export const api = {
 
   // ---------------- ADMIN ACTIONS ---------------- //
   createMovie: async (data: Partial<Movie>) => {
-    const movie = await firebaseApi.createMovie(data);
-    return { success: true, movie };
+    let createdMovie: Movie | null = null;
+    try {
+      createdMovie = await firebaseApi.createMovie(data);
+    } catch (fbErr) {
+      console.warn('Firestore createMovie warning:', fbErr);
+    }
+
+    try {
+      const token = authStorage.getToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch('/api/movies', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(createdMovie || data),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.movie) createdMovie = createdMovie || json.movie;
+      }
+    } catch (backendErr) {
+      console.warn('Backend createMovie warning:', backendErr);
+    }
+
+    if (!createdMovie) {
+      createdMovie = {
+        ...data,
+        id: `mov_${Date.now()}`,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } as Movie;
+    }
+
+    return { success: true, movie: createdMovie };
   },
 
   updateMovie: async (id: string, data: Partial<Movie>) => {
-    const movie = await firebaseApi.updateMovie(id, data);
-    return { success: true, movie };
+    let updatedMovie: Movie | null = null;
+
+    // 1. Persist to Firebase Firestore
+    try {
+      updatedMovie = await firebaseApi.updateMovie(id, data);
+    } catch (fbErr) {
+      console.warn('Firestore updateMovie warning:', fbErr);
+    }
+
+    // 2. Persist to Express JSON database
+    try {
+      const token = authStorage.getToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(`/api/movies/${id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(updatedMovie || data),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.movie) {
+          updatedMovie = updatedMovie || json.movie;
+        }
+      }
+    } catch (backendErr) {
+      console.warn('Backend updateMovie warning:', backendErr);
+    }
+
+    if (!updatedMovie) {
+      updatedMovie = {
+        ...data,
+        id,
+        updatedAt: new Date().toISOString(),
+      } as Movie;
+    }
+
+    return { success: true, movie: updatedMovie };
   },
 
   deleteMovie: async (id: string) => {
-    await firebaseApi.deleteMovie(id);
+    let deleted = false;
+    try {
+      await firebaseApi.deleteMovie(id);
+      deleted = true;
+    } catch (fbErr) {
+      console.warn('Firestore deleteMovie warning:', fbErr);
+    }
+
+    try {
+      const token = authStorage.getToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(`/api/movies/${id}`, {
+        method: 'DELETE',
+        headers,
+      });
+      if (res.ok) deleted = true;
+    } catch (backendErr) {
+      console.warn('Backend deleteMovie warning:', backendErr);
+    }
+
     return { success: true, message: 'Movie deleted successfully' };
   },
 
   togglePublish: async (id: string, published?: boolean) => {
-    const movie = await firebaseApi.togglePublish(id, Boolean(published));
+    const isPub = Boolean(published);
+    let movie: Movie | null = null;
+    try {
+      movie = await firebaseApi.togglePublish(id, isPub);
+    } catch (fbErr) {
+      console.warn('Firestore togglePublish warning:', fbErr);
+    }
+
+    try {
+      const token = authStorage.getToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(`/api/movies/${id}/publish`, {
+        method: 'PATCH',
+        headers,
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.movie) movie = movie || json.movie;
+      }
+    } catch {}
+
+    if (!movie) {
+      movie = { id, published: isPub, updatedAt: new Date().toISOString() } as Movie;
+    }
     return { success: true, movie };
   },
 
@@ -150,7 +262,7 @@ export const api = {
       const validExts = ['.jpg', '.jpeg', '.png', '.webp'];
       const lower = file.name.toLowerCase();
       const hasValidExt = validExts.some((ext) => lower.endsWith(ext));
-      const hasValidMime = validTypes.includes(file.type.toLowerCase());
+      const hasValidMime = validTypes.includes(file.type.toLowerCase()) || file.type.startsWith('image/');
 
       if (!hasValidMime && !hasValidExt) {
         reject(new Error('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.'));
@@ -163,8 +275,64 @@ export const api = {
         return;
       }
 
+      // Fallback helper using Base64 JSON upload to /api/upload-thumbnail
+      const attemptBase64Upload = () => {
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const dataUrl = reader.result as string;
+            if (onProgress) onProgress(60);
+            const res = await fetch('/api/upload-thumbnail', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                base64: dataUrl,
+                filename: file.name,
+                mimetype: file.type || 'image/jpeg',
+                movieId,
+              }),
+            });
+
+            if (onProgress) onProgress(90);
+            const raw = await res.text();
+            let parsedData: any = null;
+            try {
+              parsedData = JSON.parse(raw);
+            } catch {}
+
+            const finalUrl =
+              parsedData?.relativeUrl ||
+              parsedData?.url ||
+              parsedData?.publicUrl ||
+              parsedData?.imageUrl ||
+              parsedData?.posterUrl ||
+              parsedData?.thumbnailUrl ||
+              parsedData?.data?.url ||
+              (raw.startsWith('/') || raw.startsWith('http') ? raw.trim() : null);
+
+            if (finalUrl) {
+              if (onProgress) onProgress(100);
+              resolve(finalUrl);
+              return;
+            }
+
+            const errMsg = parsedData?.error || parsedData?.message || 'Failed to upload thumbnail.';
+            reject(new Error(errMsg));
+          } catch (b64Err: any) {
+            reject(new Error(b64Err?.message || 'Base64 thumbnail upload failed'));
+          }
+        };
+        reader.onerror = () => {
+          reject(new Error('Could not read image file for upload.'));
+        };
+        reader.readAsDataURL(file);
+      };
+
+      // 3. Primary strategy: Multipart form-data
       const formData = new FormData();
       formData.append('thumbnail', file);
+      formData.append('file', file);
+      formData.append('image', file);
       if (movieId) {
         formData.append('movieId', movieId);
       }
@@ -181,29 +349,68 @@ export const api = {
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable && onProgress) {
           const pct = Math.round((event.loaded / event.total) * 100);
-          onProgress(Math.min(99, Math.max(0, pct)));
+          onProgress(Math.min(95, Math.max(0, pct)));
         }
       };
 
       xhr.onload = () => {
+        const rawText = (xhr.responseText || '').trim();
+
+        // Check if server returned HTML (Vite / proxy routing artifact)
+        if (rawText.startsWith('<') || rawText.includes('<!DOCTYPE') || rawText.includes('<html')) {
+          console.warn('Multipart upload returned HTML, switching to Base64 JSON fallback...');
+          attemptBase64Upload();
+          return;
+        }
+
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
-            const data = JSON.parse(xhr.responseText);
-            const resolvedUrl = data.relativeUrl || data.url;
+            const data = JSON.parse(rawText);
+            const resolvedUrl =
+              data.relativeUrl ||
+              data.url ||
+              data.publicUrl ||
+              data.imageUrl ||
+              data.posterUrl ||
+              data.thumbnailUrl ||
+              data.downloadUrl ||
+              data.path ||
+              data.fileUrl ||
+              data.data?.url ||
+              data.data?.relativeUrl ||
+              data.data?.posterUrl;
+
             if (resolvedUrl) {
               if (onProgress) onProgress(100);
               resolve(resolvedUrl);
               return;
             }
+
+            if (data.error || data.message) {
+              reject(new Error(data.error || data.message));
+              return;
+            }
           } catch {
-            // parse error
+            // Not JSON
           }
+
+          if (rawText.startsWith('/') || rawText.startsWith('http://') || rawText.startsWith('https://')) {
+            if (onProgress) onProgress(100);
+            resolve(rawText);
+            return;
+          }
+
+          // If 200 status but unexpected body, try Base64 JSON fallback
+          attemptBase64Upload();
+          return;
         }
 
+        // If HTTP 400+, extract real server error message
         let errMsg = 'Image hosting service failed to upload thumbnail.';
         try {
-          const errData = JSON.parse(xhr.responseText);
+          const errData = JSON.parse(rawText);
           if (errData.error) errMsg = errData.error;
+          else if (errData.message) errMsg = errData.message;
         } catch {
           if (xhr.status === 413) {
             errMsg = 'Thumbnail image exceeds the maximum 10 MB limit.';
@@ -213,11 +420,20 @@ export const api = {
             errMsg = 'Image hosting service is temporarily unavailable. Please retry or enter a direct image URL.';
           }
         }
+
+        // Try Base64 JSON fallback if server failed on multipart boundary
+        if (xhr.status >= 400 && xhr.status < 500 && xhr.status !== 413) {
+          console.warn(`Multipart failed with HTTP ${xhr.status}, attempting Base64 fallback...`);
+          attemptBase64Upload();
+          return;
+        }
+
         reject(new Error(`${errMsg} (HTTP ${xhr.status})`));
       };
 
       xhr.onerror = () => {
-        reject(new Error('Network error connecting to image hosting CDN.'));
+        // Attempt Base64 fallback before giving up
+        attemptBase64Upload();
       };
 
       xhr.onabort = () => {

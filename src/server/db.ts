@@ -400,6 +400,31 @@ export function verifyToken(token: string): TokenPayload | null {
   if (!token || typeof token !== 'string') return null;
 
   const parts = token.split('.');
+  if (parts.length === 3) {
+    // 3-part JWT (e.g. Firebase Auth ID token)
+    try {
+      const payloadStr = Buffer.from(parts[1], 'base64url').toString('utf-8');
+      const payload = JSON.parse(payloadStr);
+      const email = (payload.email || '').toLowerCase().trim();
+      const adminEmails = ['admin@z1movies.com', 'ayanshaikh9720@gmail.com'];
+      const isAdmin = adminEmails.includes(email) || payload.role === 'admin' || payload.admin === true;
+
+      // Note: Firebase JWT exp is in seconds
+      if (payload.exp && (payload.exp > 10000000000 ? payload.exp : payload.exp * 1000) < Date.now()) {
+        return null;
+      }
+
+      return {
+        userId: payload.user_id || payload.sub || payload.uid || 'usr_fb',
+        role: isAdmin ? 'admin' : 'user',
+        email: email || 'user@z1movies.com',
+        exp: payload.exp ? (payload.exp > 10000000000 ? payload.exp : payload.exp * 1000) : Date.now() + 3600000,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   if (parts.length !== 2) return null;
 
   const [payloadB64, providedSig] = parts;

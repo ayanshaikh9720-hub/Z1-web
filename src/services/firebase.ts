@@ -632,7 +632,7 @@ export const firebaseApi = {
     const validExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
     const lowerName = file.name.toLowerCase();
     const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
-    const hasValidMime = validMimes.includes(file.type.toLowerCase());
+    const hasValidMime = validMimes.includes(file.type.toLowerCase()) || file.type.startsWith('image/');
 
     if (!hasValidMime && !hasValidExt) {
       throw new Error('Invalid image format. Allowed formats: JPG, JPEG, PNG, WebP.');
@@ -644,13 +644,68 @@ export const firebaseApi = {
       throw new Error('Image file is too large. Maximum allowed size is 10 MB.');
     }
 
-    const formData = new FormData();
-    formData.append('thumbnail', file);
-    if (movieId) {
-      formData.append('movieId', movieId);
-    }
-
     return new Promise<string>((resolve, reject) => {
+      // Fallback helper using Base64 JSON upload to /api/upload-thumbnail
+      const attemptBase64Upload = () => {
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const dataUrl = reader.result as string;
+            if (onProgress) onProgress(60);
+            const res = await fetch('/api/upload-thumbnail', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                base64: dataUrl,
+                filename: file.name,
+                mimetype: file.type || 'image/jpeg',
+                movieId,
+              }),
+            });
+
+            if (onProgress) onProgress(90);
+            const raw = await res.text();
+            let parsedData: any = null;
+            try {
+              parsedData = JSON.parse(raw);
+            } catch {}
+
+            const finalUrl =
+              parsedData?.relativeUrl ||
+              parsedData?.url ||
+              parsedData?.publicUrl ||
+              parsedData?.imageUrl ||
+              parsedData?.posterUrl ||
+              parsedData?.thumbnailUrl ||
+              parsedData?.data?.url ||
+              (raw.startsWith('/') || raw.startsWith('http') ? raw.trim() : null);
+
+            if (finalUrl) {
+              if (onProgress) onProgress(100);
+              resolve(finalUrl);
+              return;
+            }
+
+            const errMsg = parsedData?.error || parsedData?.message || 'Failed to upload thumbnail.';
+            reject(new Error(errMsg));
+          } catch (b64Err: any) {
+            reject(new Error(b64Err?.message || 'Base64 thumbnail upload failed'));
+          }
+        };
+        reader.onerror = () => {
+          reject(new Error('Could not read image file for upload.'));
+        };
+        reader.readAsDataURL(file);
+      };
+
+      const formData = new FormData();
+      formData.append('thumbnail', file);
+      formData.append('file', file);
+      formData.append('image', file);
+      if (movieId) {
+        formData.append('movieId', movieId);
+      }
+
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/upload-thumbnail');
 
@@ -663,29 +718,68 @@ export const firebaseApi = {
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable && onProgress) {
           const pct = Math.round((event.loaded / event.total) * 100);
-          onProgress(Math.min(99, Math.max(0, pct)));
+          onProgress(Math.min(95, Math.max(0, pct)));
         }
       };
 
       xhr.onload = () => {
+        const rawText = (xhr.responseText || '').trim();
+
+        // Detect HTML SPA response artifact
+        if (rawText.startsWith('<') || rawText.includes('<!DOCTYPE') || rawText.includes('<html')) {
+          console.warn('Multipart upload returned HTML, switching to Base64 JSON fallback...');
+          attemptBase64Upload();
+          return;
+        }
+
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
-            const data = JSON.parse(xhr.responseText);
-            const resolvedUrl = data.relativeUrl || data.url;
+            const data = JSON.parse(rawText);
+            const resolvedUrl =
+              data.relativeUrl ||
+              data.url ||
+              data.publicUrl ||
+              data.imageUrl ||
+              data.posterUrl ||
+              data.thumbnailUrl ||
+              data.downloadUrl ||
+              data.path ||
+              data.fileUrl ||
+              data.data?.url ||
+              data.data?.relativeUrl ||
+              data.data?.posterUrl;
+
             if (resolvedUrl) {
               if (onProgress) onProgress(100);
               resolve(resolvedUrl);
               return;
             }
+
+            if (data.error || data.message) {
+              reject(new Error(data.error || data.message));
+              return;
+            }
           } catch {
-            // parse error
+            // Not JSON
           }
+
+          if (rawText.startsWith('/') || rawText.startsWith('http://') || rawText.startsWith('https://')) {
+            if (onProgress) onProgress(100);
+            resolve(rawText);
+            return;
+          }
+
+          // If 200 status but unexpected schema, attempt Base64 JSON fallback
+          attemptBase64Upload();
+          return;
         }
 
+        // Extract real server error
         let errMsg = 'Image hosting service failed to upload thumbnail.';
         try {
-          const errData = JSON.parse(xhr.responseText);
+          const errData = JSON.parse(rawText);
           if (errData.error) errMsg = errData.error;
+          else if (errData.message) errMsg = errData.message;
         } catch {
           if (xhr.status === 413) {
             errMsg = 'Thumbnail image exceeds the maximum 10 MB limit.';
@@ -695,11 +789,18 @@ export const firebaseApi = {
             errMsg = 'Image hosting service is temporarily unavailable. Please retry or enter a direct image URL.';
           }
         }
+
+        if (xhr.status >= 400 && xhr.status < 500 && xhr.status !== 413) {
+          console.warn(`Multipart failed with HTTP ${xhr.status}, attempting Base64 fallback...`);
+          attemptBase64Upload();
+          return;
+        }
+
         reject(new Error(`${errMsg} (HTTP ${xhr.status})`));
       };
 
       xhr.onerror = () => {
-        reject(new Error('Network error connecting to image hosting CDN.'));
+        attemptBase64Upload();
       };
 
       xhr.onabort = () => {

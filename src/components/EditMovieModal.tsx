@@ -204,11 +204,11 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
       return;
     }
 
-    // Instant local preview
+    // Instant local tentative preview for responsive UX while upload proceeds
+    let tentativeBlobUrl = '';
     try {
-      const immediatePreview = URL.createObjectURL(file);
-      setNewThumbnailPreview(immediatePreview);
-      setThumbnailChanged(true);
+      tentativeBlobUrl = URL.createObjectURL(file);
+      setNewThumbnailPreview(tentativeBlobUrl);
     } catch {}
 
     setSelectedThumbnailFile(file);
@@ -234,11 +234,25 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
       );
 
       const cleanUrl = normalizePosterUrl(downloadUrl, title);
+      // Revoke temporary blob URL
+      if (tentativeBlobUrl) {
+        try { URL.revokeObjectURL(tentativeBlobUrl); } catch {}
+      }
+
+      // Save verified permanent image URL
       setNewThumbnailPreview(cleanUrl);
+      setCurrentPosterUrl(cleanUrl);
       setThumbnailChanged(true);
       setThumbnailUploadSuccess(`New thumbnail uploaded to storage: ${file.name}`);
+      setThumbnailUploadError('');
     } catch (err: any) {
       console.error('Thumbnail upload error in EditMovieModal:', err);
+      if (tentativeBlobUrl) {
+        try { URL.revokeObjectURL(tentativeBlobUrl); } catch {}
+      }
+      // Revert tentative preview to avoid blocking saves or presenting unsaved blob as permanent
+      setNewThumbnailPreview(null);
+      setThumbnailChanged(false);
       setThumbnailUploadError(`Thumbnail upload failed: ${err.message || 'Unknown image hosting error'}`);
     } finally {
       setIsProcessingThumbnail(false);
@@ -265,10 +279,20 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
 
   // Handle Manual Thumbnail URL Apply
   const handleApplyThumbnailUrl = () => {
-    if (!thumbnailInputUrl.trim()) return;
-    const cleanUrl = normalizePosterUrl(thumbnailInputUrl.trim(), title);
+    const rawUrl = thumbnailInputUrl.trim();
+    if (!rawUrl) return;
+
+    if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://') && !rawUrl.startsWith('/uploads/') && !rawUrl.startsWith('/images/')) {
+      setThumbnailUploadError('Please enter a valid image URL starting with https://, http://, or /uploads/');
+      return;
+    }
+
+    setThumbnailUploadError('');
+    const cleanUrl = normalizePosterUrl(rawUrl, title);
     setNewThumbnailPreview(cleanUrl);
+    setCurrentPosterUrl(cleanUrl);
     setThumbnailChanged(true);
+    setThumbnailUploadSuccess('Direct image URL applied to movie poster.');
     setThumbnailInputUrl('');
   };
 
@@ -276,6 +300,8 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   const handleRevertThumbnail = () => {
     setNewThumbnailPreview(null);
     setThumbnailChanged(false);
+    setThumbnailUploadError('');
+    setThumbnailUploadSuccess('');
     setCurrentPosterUrl(normalizePosterUrl(movie.posterUrl, movie.title));
   };
 
@@ -621,6 +647,10 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                 {thumbnailChanged ? (
                   <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-800/60">
                     New Selected
+                  </span>
+                ) : thumbnailUploadError ? (
+                  <span className="text-[10px] text-red-400 font-bold bg-red-950/60 px-2 py-0.5 rounded-full border border-red-800/60">
+                    Upload Failed
                   </span>
                 ) : (
                   <span className="text-[10px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
