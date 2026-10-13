@@ -210,6 +210,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
       backdropUrl: '',
       videoUrl: '',
       videoType: 'mp4',
+      trailerUrl: '',
       downloadUrls: [
         {
           quality: '1080p',
@@ -630,8 +631,235 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         </div>
       </div>
 
-      {/* Movie Management Table */}
-      <div className="bg-[#0e111a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+      {/* Movie Management: Mobile Card View (for Android and small screens) */}
+      <div className="block md:hidden space-y-3">
+        {displayMovies.length === 0 ? (
+          <div className="p-8 text-center bg-[#0e111a] border border-slate-800 rounded-2xl text-slate-500 text-xs">
+            No movies match the current filter.
+          </div>
+        ) : (
+          displayMovies.map((movie) => (
+            <div
+              key={movie.id}
+              className="p-3.5 bg-[#0e111a] border border-slate-800 rounded-2xl space-y-3 shadow-lg"
+            >
+              {/* Header: Poster, Title, Meta, and 3-dot Menu */}
+              <div className="flex items-start gap-3">
+                <img
+                  src={normalizePosterUrl(movie.posterUrl, movie.title)}
+                  alt={movie.title}
+                  className="w-14 h-20 object-cover rounded-xl bg-slate-800 shrink-0 border border-slate-700/60 shadow"
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = DEFAULT_POSTER_FALLBACK;
+                  }}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-1.5">
+                    <h4 className="font-bold text-white text-sm leading-tight truncate">
+                      {movie.title}
+                    </h4>
+                    {/* Three-dot menu button */}
+                    <div className="relative inline-block admin-actions-menu shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveMenuMovieId(activeMenuMovieId === movie.id ? null : movie.id);
+                        }}
+                        className={`p-2 rounded-xl text-xs font-semibold border transition-all min-h-[44px] min-w-[44px] flex items-center justify-center ${
+                          activeMenuMovieId === movie.id
+                            ? 'bg-red-600 text-white border-red-500'
+                            : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+                        }`}
+                        aria-label={`Actions for ${movie.title}`}
+                      >
+                        <MoreVertical className="w-4 h-4" />
+                      </button>
+
+                      {activeMenuMovieId === movie.id && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="absolute right-0 mt-1.5 w-56 rounded-xl bg-[#121624] border border-slate-700 shadow-2xl py-1.5 z-40 divide-y divide-slate-800/80 animate-in fade-in zoom-in-95 duration-100"
+                        >
+                          <div className="px-3 py-1.5">
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                              Movie Actions
+                            </div>
+                            <div className="text-xs font-semibold text-slate-200 truncate">
+                              {movie.title}
+                            </div>
+                          </div>
+
+                          <div className="py-1">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(movie, 'general')}
+                              className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium min-h-[40px]"
+                            >
+                              <Edit2 className="w-3.5 h-3.5 text-red-400" />
+                              <span>Edit Movie</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(movie, 'thumbnail')}
+                              className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium min-h-[40px]"
+                            >
+                              <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Change Poster</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(movie, 'video')}
+                              className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium min-h-[40px]"
+                            >
+                              <Upload className="w-3.5 h-3.5 text-sky-400" />
+                              <span>Replace Video</span>
+                            </button>
+                          </div>
+
+                          <div className="py-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveMenuMovieId(null);
+                                handleTogglePublish(movie);
+                              }}
+                              className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium min-h-[40px]"
+                            >
+                              {movie.published ? (
+                                <>
+                                  <EyeOff className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>Unpublish (Make Draft)</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>Publish (Make Live)</span>
+                                </>
+                              )}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveMenuMovieId(null);
+                                handleToggleFeatured(movie);
+                              }}
+                              className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium min-h-[40px]"
+                            >
+                              <Star className={`w-3.5 h-3.5 ${movie.featured ? 'text-slate-400' : 'text-amber-400 fill-amber-400'}`} />
+                              <span>{movie.featured ? 'Remove from Featured' : 'Add to Featured'}</span>
+                            </button>
+                          </div>
+
+                          <div className="py-1">
+                            <button
+                              type="button"
+                              onClick={() => handleStartDelete(movie)}
+                              className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-red-950/40 hover:text-red-300 flex items-center gap-2.5 transition-colors font-bold min-h-[40px]"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                              <span>Delete Movie</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-slate-400 mt-1">
+                    {movie.releaseYear} · {movie.language}
+                  </div>
+
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {movie.genres.slice(0, 3).map((g) => (
+                      <span key={g} className="px-2 py-0.5 rounded-md text-[10px] bg-slate-800 text-slate-300 border border-slate-700/60 font-medium">
+                        {g}
+                      </span>
+                    ))}
+                    {movie.featured && (
+                      <span className="flex items-center gap-1 text-[10px] bg-red-950/80 text-red-300 border border-red-800/60 px-1.5 py-0.5 rounded font-medium">
+                        <Star className="w-2.5 h-2.5 fill-current" />
+                        Featured
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="text-[10px] text-slate-500 font-mono truncate mt-1">
+                    {movie.videoUrl}
+                  </div>
+                </div>
+              </div>
+
+              {/* Status & Stats row */}
+              <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-800/80">
+                <button
+                  type="button"
+                  onClick={() => handleTogglePublish(movie)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-h-[36px] ${
+                    movie.published
+                      ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60'
+                      : 'bg-amber-950/60 text-amber-400 border border-amber-800/60'
+                  }`}
+                >
+                  {movie.published ? (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Published</span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-3.5 h-3.5" />
+                      <span>Draft</span>
+                    </>
+                  )}
+                </button>
+
+                <div className="flex items-center gap-3 text-xs text-slate-400">
+                  <span className="font-mono">{movie.views?.toLocaleString() || 0} views</span>
+                  <span className="font-mono">{movie.downloads?.toLocaleString() || 0} dl</span>
+                </div>
+              </div>
+
+              {/* Primary Mobile Action Buttons (Easy-to-tap on Android) */}
+              <div className="grid grid-cols-3 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => handleOpenEditModal(movie, 'general')}
+                  className="min-h-[44px] py-2 px-3 bg-slate-800 hover:bg-slate-700 active:bg-slate-750 text-white rounded-xl text-xs font-bold border border-slate-700 flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                >
+                  <Edit2 className="w-4 h-4 text-red-400" />
+                  <span>Edit Movie</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleStartDelete(movie)}
+                  className="min-h-[44px] py-2 px-3 bg-red-950/60 hover:bg-red-900/60 active:bg-red-900 text-red-300 rounded-xl text-xs font-bold border border-red-800/60 flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                >
+                  <Trash2 className="w-4 h-4 text-red-400" />
+                  <span>Delete</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onPlayMovie(movie)}
+                  className="min-h-[44px] py-2 px-3 bg-slate-800/80 hover:bg-slate-700 active:bg-slate-750 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700/80 flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <Play className="w-4 h-4 fill-current text-slate-300" />
+                  <span>Test Play</span>
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Movie Management Table (Desktop & Tablet screens) */}
+      <div className="hidden md:block bg-[#0e111a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs text-slate-300">
             <thead className="bg-slate-900/90 text-slate-400 uppercase font-semibold border-b border-slate-800">
@@ -728,9 +956,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                     </td>
 
                     <td className="py-3 px-4 text-right">
-                      <div className="flex items-center justify-end gap-2">
+                      <div className="flex items-center justify-end gap-1.5">
                         {/* Play Test Stream */}
                         <button
+                          type="button"
                           onClick={() => onPlayMovie(movie)}
                           className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-300 hover:text-white transition-colors"
                           title="Test Player Stream"
@@ -738,7 +967,29 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                           <Play className="w-3.5 h-3.5 fill-current" />
                         </button>
 
-                        {/* Clearly Visible Actions Menu */}
+                        {/* Visible Direct Edit Movie Button */}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditModal(movie, 'general')}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-750 text-slate-200 hover:text-white flex items-center gap-1.5 text-xs font-semibold border border-slate-700 hover:border-slate-600 transition-colors"
+                          title="Edit Movie"
+                        >
+                          <Edit2 className="w-3.5 h-3.5 text-red-400" />
+                          <span>Edit</span>
+                        </button>
+
+                        {/* Visible Direct Delete Movie Button */}
+                        <button
+                          type="button"
+                          onClick={() => handleStartDelete(movie)}
+                          className="px-2.5 py-1.5 rounded-lg bg-red-950/50 hover:bg-red-900/60 active:bg-red-900 text-red-300 hover:text-red-200 flex items-center gap-1.5 text-xs font-semibold border border-red-800/60 hover:border-red-700 transition-colors"
+                          title="Delete Movie"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                          <span>Delete</span>
+                        </button>
+
+                        {/* Three-Dot / More Options Menu */}
                         <div className="relative inline-block text-left admin-actions-menu">
                           <button
                             type="button"
@@ -746,14 +997,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                               e.stopPropagation();
                               setActiveMenuMovieId(activeMenuMovieId === movie.id ? null : movie.id);
                             }}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                            className={`p-1.5 rounded-lg text-xs font-semibold border transition-all ${
                               activeMenuMovieId === movie.id
                                 ? 'bg-red-600 text-white border-red-500 shadow-md'
                                 : 'bg-slate-800 hover:bg-slate-700 active:bg-slate-750 text-slate-200 hover:text-white border-slate-700 hover:border-slate-600'
                             }`}
-                            aria-label={`Actions for ${movie.title}`}
+                            aria-label={`More actions for ${movie.title}`}
+                            title="More actions"
                           >
-                            <span>Actions</span>
                             <MoreVertical className="w-3.5 h-3.5 opacity-80" />
                           </button>
 
@@ -775,7 +1026,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenEditModal(movie, 'general')}
-                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium"
                                 >
                                   <Edit2 className="w-3.5 h-3.5 text-red-400" />
                                   <span>Edit Movie</span>
@@ -784,7 +1035,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenEditModal(movie, 'thumbnail')}
-                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium"
                                 >
                                   <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
                                   <span>Change Thumbnail</span>
@@ -793,7 +1044,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenEditModal(movie, 'video')}
-                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium"
                                 >
                                   <Upload className="w-3.5 h-3.5 text-sky-400" />
                                   <span>Replace Video</span>
@@ -807,7 +1058,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                                     setActiveMenuMovieId(null);
                                     handleTogglePublish(movie);
                                   }}
-                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium"
                                 >
                                   {movie.published ? (
                                     <>
@@ -828,7 +1079,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                                     setActiveMenuMovieId(null);
                                     handleToggleFeatured(movie);
                                   }}
-                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                                  className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium"
                                 >
                                   <Star className={`w-3.5 h-3.5 ${movie.featured ? 'text-slate-400' : 'text-amber-400 fill-amber-400'}`} />
                                   <span>{movie.featured ? 'Remove from Featured' : 'Add to Featured'}</span>
@@ -839,7 +1090,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => handleStartDelete(movie)}
-                                  className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-red-950/40 hover:text-red-300 flex items-center gap-2.5 transition-colors font-medium"
+                                  className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-red-950/40 hover:text-red-300 flex items-center gap-2.5 transition-colors font-bold"
                                 >
                                   <Trash2 className="w-3.5 h-3.5 text-red-500" />
                                   <span>Delete Movie</span>
@@ -1355,6 +1606,18 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                       <option value="webm">WebM</option>
                     </select>
                   </div>
+                </div>
+
+                {/* Trailer URL Field */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Trailer URL (Optional)</label>
+                  <input
+                    type="text"
+                    value={currentNewMovie.trailerUrl || ''}
+                    onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, trailerUrl: e.target.value })}
+                    placeholder="https://www.youtube.com/watch?v=... or MP4 trailer URL"
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono"
+                  />
                 </div>
 
                 {/* Probe & Verification Action */}

@@ -64,6 +64,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   const [featured, setFeatured] = useState<boolean>(Boolean(movie.featured));
   const [trending, setTrending] = useState<boolean>(Boolean(movie.trending));
   const [published, setPublished] = useState<boolean>(Boolean(movie.published));
+  const [trailerUrl, setTrailerUrl] = useState<string>(movie.trailerUrl || '');
 
   // Audio and Subtitle Tracks
   const [audioTracks, setAudioTracks] = useState<AudioTrack[]>(
@@ -318,6 +319,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
         trending,
         published,
         posterUrl: finalPosterUrl,
+        trailerUrl: trailerUrl.trim() || undefined,
         audioTracks: audioTracks.filter((t) => t.language && t.url),
         subtitleTracks: subtitleTracks.filter((s) => s.language && s.src),
         videoUrl: videoUrl.trim() || movie.videoUrl,
@@ -1204,6 +1206,23 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                   <span>{probeResult.message}</span>
                 </div>
               )}
+            </div>
+
+            {/* Trailer URL Field */}
+            <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
+              <label className="block text-xs font-semibold text-slate-300">
+                Trailer URL (Optional)
+              </label>
+              <input
+                type="text"
+                value={trailerUrl}
+                onChange={(e) => setTrailerUrl(e.target.value)}
+                placeholder="https://www.youtube.com/watch?v=... or MP4 trailer URL"
+                className="w-full bg-black/50 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-slate-600 focus:outline-none focus:border-red-500"
+              />
+              <p className="text-[10px] text-slate-500">
+                Direct MP4 trailer video link or video embed preview.
+              </p>
             </div>
 
             {/* Replace Video File Uploader */}

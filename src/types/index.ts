@@ -32,6 +32,7 @@ export interface Movie {
   videoUrl: string;
   videoType: 'mp4' | 'hls' | 'webm';
   downloadUrls: DownloadOption[];
+  trailerUrl?: string;
   audioTracks?: AudioTrack[];
   subtitleTracks?: SubtitleTrack[];
   releaseYear: number;

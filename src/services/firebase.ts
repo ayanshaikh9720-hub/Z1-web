@@ -376,6 +376,7 @@ function docToMovie(docSnap: any): Movie {
     videoUrl: data.videoUrl || '',
     videoType: data.videoType || 'mp4',
     downloadUrls: Array.isArray(data.downloadUrls) ? data.downloadUrls : [],
+    trailerUrl: data.trailerUrl || undefined,
     audioTracks: Array.isArray(data.audioTracks) ? data.audioTracks : [],
     subtitleTracks: Array.isArray(data.subtitleTracks) ? data.subtitleTracks : [],
     releaseYear: data.releaseYear || new Date().getFullYear(),
