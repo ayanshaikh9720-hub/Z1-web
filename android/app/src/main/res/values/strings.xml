@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Z1 Movies</string>
+    <string name="title_activity_main">Z1 Movies</string>
+    <string name="package_name">com.z1movies.app</string>
+    <string name="custom_url_scheme">com.z1movies.app</string>
+</resources>

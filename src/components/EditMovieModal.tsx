@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   Film, Image as ImageIcon, Upload, Check, AlertTriangle, X,
   Lock, Star, Flame, Eye, RefreshCw, CheckCircle2, Shield,
-  Languages, Volume2, Subtitles, Plus, Trash2
+  Languages, Volume2, Subtitles, Plus, Trash2, Sparkles, Loader2
 } from 'lucide-react';
 import { Movie, AudioTrack, SubtitleTrack } from '../types';
 import { api } from '../services/api';
@@ -73,6 +73,20 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>(
     Array.isArray(movie.subtitleTracks) ? [...movie.subtitleTracks] : []
   );
+
+  // AI Dubbing States
+  const [aiDubbingText, setAiDubbingText] = useState<string>(movie.description || '');
+  const [aiDubbingLang, setAiDubbingLang] = useState<string>('Hindi');
+  const [aiDubbingVoice, setAiDubbingVoice] = useState<string>('Kore');
+  const [isGeneratingDub, setIsGeneratingDub] = useState<boolean>(false);
+  const [dubbingError, setDubbingError] = useState<string>('');
+  const [dubbingSuccess, setDubbingSuccess] = useState<string>('');
+
+  // AI Subtitle States
+  const [aiSubtitleLang, setAiSubtitleLang] = useState<string>('Hindi');
+  const [isTranslatingSub, setIsTranslatingSub] = useState<boolean>(false);
+  const [subtitleAiError, setSubtitleAiError] = useState<string>('');
+  const [subtitleAiSuccess, setSubtitleAiSuccess] = useState<string>('');
 
   // Thumbnail handling
   const [currentPosterUrl, setCurrentPosterUrl] = useState<string>(normalizePosterUrl(movie.posterUrl, movie.title));
@@ -338,6 +352,93 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
       setError(err.message || 'Failed to save changes. Please try again.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleGenerateAiDubbing = async () => {
+    if (!aiDubbingText.trim()) {
+      setDubbingError('Please enter dialogue or scene voiceover text.');
+      return;
+    }
+    setIsGeneratingDub(true);
+    setDubbingError('');
+    setDubbingSuccess('');
+    try {
+      const res = await api.generateDubbing({
+        movieId: movie.id,
+        text: aiDubbingText.trim(),
+        targetLanguage: aiDubbingLang,
+        voiceName: aiDubbingVoice,
+      });
+
+      if (res.success && res.audioUrl) {
+        const newTrack: AudioTrack = {
+          id: `audio_ai_${Date.now()}`,
+          language: res.language,
+          label: res.label || `${res.language} [AI Dubbed]`,
+          url: res.audioUrl,
+        };
+        setAudioTracks((prev) => [...prev, newTrack]);
+        setDubbingSuccess(`Generated AI dubbed audio for ${res.language} successfully! Track added.`);
+      } else {
+        throw new Error('Dubbing generation did not produce an audio track.');
+      }
+    } catch (err: any) {
+      setDubbingError(err.message || 'AI dubbing generation failed.');
+    } finally {
+      setIsGeneratingDub(false);
+    }
+  };
+
+  const handleTranslateAiSubtitles = async () => {
+    setIsTranslatingSub(true);
+    setSubtitleAiError('');
+    setSubtitleAiSuccess('');
+    try {
+      let sourceVtt = '';
+      const existingWithSrc = subtitleTracks.find((s) => s.src && s.src.includes('WEBVTT'));
+      if (existingWithSrc) {
+        if (existingWithSrc.src.startsWith('data:')) {
+          sourceVtt = decodeURIComponent(existingWithSrc.src.replace(/^data:text\/vtt;[^,]*,/, ''));
+        } else {
+          try {
+            const fetchRes = await fetch(existingWithSrc.src);
+            if (fetchRes.ok) {
+              sourceVtt = await fetchRes.text();
+            }
+          } catch {
+            // fallback below
+          }
+        }
+      }
+
+      if (!sourceVtt) {
+        sourceVtt = `WEBVTT\n\n00:00:01.000 --> 00:00:06.000\n${title || movie.title}: ${description || movie.description || 'Welcome to cinematic streaming.'}\n\n00:00:07.000 --> 00:00:12.000\nDirected by ${director || movie.director || 'Curator'}. Starring ${cast || 'ensemble cast'}.`;
+      }
+
+      const res = await api.translateSubtitles({
+        movieId: movie.id,
+        vttContent: sourceVtt,
+        targetLanguage: aiSubtitleLang,
+      });
+
+      if (res.success && (res.subtitleUrl || res.vttContent)) {
+        const newTrack: SubtitleTrack = {
+          id: `sub_ai_${Date.now()}`,
+          language: res.language,
+          label: res.label || `${res.language} [AI Translated]`,
+          src: res.subtitleUrl || `data:text/vtt;charset=utf-8,${encodeURIComponent(res.vttContent || '')}`,
+          format: 'vtt',
+        };
+        setSubtitleTracks((prev) => [...prev, newTrack]);
+        setSubtitleAiSuccess(`Translated WebVTT subtitle track for ${res.language} successfully! Track added.`);
+      } else {
+        throw new Error('Subtitle translation did not produce a valid track.');
+      }
+    } catch (err: any) {
+      setSubtitleAiError(err.message || 'AI subtitle translation failed.');
+    } finally {
+      setIsTranslatingSub(false);
     }
   };
 
@@ -824,6 +925,83 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                 </span>
               </div>
 
+              {/* AI Dubbing Audio Studio */}
+              <div className="p-3 bg-red-950/20 border border-red-900/40 rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-red-300">
+                    <Sparkles className="w-3.5 h-3.5 text-red-400" />
+                    <span>AI Dubbing Voiceover Studio</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-mono">Gemini TTS</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                  <div className="sm:col-span-3">
+                    <label className="text-[10px] text-slate-400 block mb-1">Target Language</label>
+                    <select
+                      value={aiDubbingLang}
+                      onChange={(e) => setAiDubbingLang(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white"
+                    >
+                      {['Hindi', 'Tamil', 'Telugu', 'Spanish', 'French', 'German', 'Japanese'].map((l) => (
+                        <option key={l} value={l}>{l}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="sm:col-span-3">
+                    <label className="text-[10px] text-slate-400 block mb-1">Voice</label>
+                    <select
+                      value={aiDubbingVoice}
+                      onChange={(e) => setAiDubbingVoice(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white"
+                    >
+                      <option value="Kore">Kore (Balanced)</option>
+                      <option value="Puck">Puck (Energetic)</option>
+                      <option value="Fenrir">Fenrir (Deep)</option>
+                      <option value="Zephyr">Zephyr (Smooth)</option>
+                      <option value="Charon">Charon (Dramatic)</option>
+                    </select>
+                  </div>
+
+                  <div className="sm:col-span-6">
+                    <label className="text-[10px] text-slate-400 block mb-1">Voiceover Script / Dialogue</label>
+                    <input
+                      type="text"
+                      value={aiDubbingText}
+                      onChange={(e) => setAiDubbingText(e.target.value)}
+                      placeholder="Script text for scene or synopsis voiceover..."
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <div className="text-[10px]">
+                    {dubbingError && <span className="text-red-400 font-semibold">{dubbingError}</span>}
+                    {dubbingSuccess && <span className="text-emerald-400 font-semibold">{dubbingSuccess}</span>}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleGenerateAiDubbing}
+                    disabled={isGeneratingDub}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:bg-slate-800 text-white rounded-lg text-xs font-bold transition-colors shadow-sm ml-auto"
+                  >
+                    {isGeneratingDub ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Generating Voice...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Synthesize {aiDubbingLang} Track</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
               {/* Extra Dubbed Tracks */}
               {audioTracks.length === 0 ? (
                 <div className="text-[11px] text-slate-500 italic pl-1">
@@ -948,6 +1126,60 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                   <Plus className="w-3.5 h-3.5" />
                   <span>Add Subtitle Track</span>
                 </button>
+              </div>
+
+              {/* AI Subtitle Translator */}
+              <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-300">
+                    <Sparkles className="w-3.5 h-3.5 text-red-400" />
+                    <span>AI Subtitle Translator</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-mono">Gemini 3.8 Flash</span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="w-full sm:w-56">
+                    <label className="text-[10px] text-slate-400 block mb-1">Target Language</label>
+                    <select
+                      value={aiSubtitleLang}
+                      onChange={(e) => setAiSubtitleLang(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white"
+                    >
+                      {['Hindi', 'Spanish', 'French', 'German', 'Tamil', 'Telugu', 'Japanese', 'Arabic', 'Russian'].map((l) => (
+                        <option key={l} value={l}>{l}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="pt-2 sm:pt-4 flex items-center justify-end">
+                    <button
+                      type="button"
+                      onClick={handleTranslateAiSubtitles}
+                      disabled={isTranslatingSub}
+                      className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:bg-slate-800 text-white rounded-lg text-xs font-bold transition-colors shadow-sm"
+                    >
+                      {isTranslatingSub ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Translating Subtitles...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Translate Subtitles to {aiSubtitleLang}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {(subtitleAiError || subtitleAiSuccess) && (
+                  <div className="text-[10px] pt-1">
+                    {subtitleAiError && <span className="text-red-400 font-semibold">{subtitleAiError}</span>}
+                    {subtitleAiSuccess && <span className="text-emerald-400 font-semibold">{subtitleAiSuccess}</span>}
+                  </div>
+                )}
               </div>
 
               {subtitleTracks.length === 0 ? (

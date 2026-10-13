@@ -17,7 +17,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -33,7 +32,9 @@ jobs:
 
       - name: Setup Capacitor Android
         run: |
-          npx cap add android
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
           npx cap sync android
 
       - name: Build APK

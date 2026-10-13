@@ -165,7 +165,6 @@ export const api = {
 
       const formData = new FormData();
       formData.append('thumbnail', file);
-      formData.append('file', file);
       if (movieId) {
         formData.append('movieId', movieId);
       }
@@ -248,7 +247,6 @@ export const api = {
     return new Promise((resolve, reject) => {
       const formData = new FormData();
       formData.append('video', file);
-      formData.append('file', file);
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/upload');
@@ -474,5 +472,59 @@ export const api = {
   submitContact: async (data: { name: string; email: string; subject: string; message: string }) => {
     await firebaseApi.submitContact(data);
     return { success: true, message: 'Your message has been received by the Z1 Movies team.' };
+  },
+
+  // ---------------- AI SUBTITLES & DUBBING ---------------- //
+  translateSubtitles: async (params: {
+    movieId?: string;
+    text?: string;
+    vttContent?: string;
+    targetLanguage: string;
+  }): Promise<{
+    success: boolean;
+    subtitleUrl?: string;
+    language: string;
+    label: string;
+    translatedText?: string;
+    vttContent?: string;
+  }> => {
+    const res = await fetch('/api/ai/translate-subtitles', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `Translation failed (HTTP ${res.status})`);
+    }
+    return res.json();
+  },
+
+  generateDubbing: async (params: {
+    movieId?: string;
+    text: string;
+    targetLanguage: string;
+    voiceName?: string;
+  }): Promise<{
+    success: boolean;
+    audioUrl: string;
+    language: string;
+    label: string;
+    voice?: string;
+  }> => {
+    const res = await fetch('/api/ai/generate-dubbing', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `Dubbing generation failed (HTTP ${res.status})`);
+    }
+    return res.json();
   },
 };

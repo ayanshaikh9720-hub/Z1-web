@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import http from 'http';
 import https from 'https';
 import multer from 'multer';
+import { GoogleGenAI } from '@google/genai';
 import { loadDB, saveDB, getInitialSeedData, authenticateUser, generateToken, verifyToken, TokenPayload } from './db';
 
 const app = express();
@@ -39,8 +40,28 @@ if (!ensureDirectoryWritable(activeThumbnailsDir)) {
   ensureDirectoryWritable(activeThumbnailsDir);
 }
 
+export let activeSubtitlesDir = path.join(activeUploadsDir, 'subtitles');
+if (!ensureDirectoryWritable(activeSubtitlesDir)) {
+  activeSubtitlesDir = path.join(FALLBACK_UPLOADS_DIR, 'subtitles');
+  ensureDirectoryWritable(activeSubtitlesDir);
+}
+
+export let activeDubbedDir = path.join(activeUploadsDir, 'dubbed');
+if (!ensureDirectoryWritable(activeDubbedDir)) {
+  activeDubbedDir = path.join(FALLBACK_UPLOADS_DIR, 'dubbed');
+  ensureDirectoryWritable(activeDubbedDir);
+}
+
 // In-memory cache for high-availability thumbnail hosting across serverless/ephemeral instances
 export const thumbnailMemoryCache = new Map<string, {
+  buffer: Buffer;
+  mimetype: string;
+  createdAt: number;
+}>();
+
+// In-memory cache for AI subtitles and dubbed audio
+export const subtitlesMemoryCache = new Map<string, string>();
+export const dubbedMemoryCache = new Map<string, {
   buffer: Buffer;
   mimetype: string;
   createdAt: number;
@@ -51,7 +72,7 @@ const uploadThumbnailMiddleware = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB
-    files: 1,
+    files: 10,
   },
 }).any(); // Accept any field name (thumbnail, file, poster, image) so unexpected field error never occurs
 
@@ -1113,6 +1134,265 @@ const serveVideoUploadHandler = (req: Request, res: Response) => {
     fs.createReadStream(targetPath).pipe(res);
   }
 };
+
+// Static handler for subtitle files (.vtt)
+const serveSubtitleHandler = (req: Request, res: Response) => {
+  const filename = path.basename(req.params.filename);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+
+  // Check cache first
+  if (subtitlesMemoryCache.has(filename)) {
+    return res.send(subtitlesMemoryCache.get(filename));
+  }
+
+  // Check disk
+  const searchDirs = [
+    activeSubtitlesDir,
+    path.resolve(process.cwd(), 'uploads', 'subtitles'),
+    path.resolve(process.cwd(), 'uploads'),
+    '/tmp/uploads/subtitles',
+  ];
+  for (const dir of searchDirs) {
+    const p = path.join(dir, filename);
+    if (fs.existsSync(p)) {
+      return fs.createReadStream(p).pipe(res);
+    }
+  }
+  return res.status(404).json({ error: 'Subtitle track not found' });
+};
+
+// Static streaming handler for dubbed audio (.wav, .mp3)
+const serveDubbedAudioHandler = (req: Request, res: Response) => {
+  const filename = path.basename(req.params.filename);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Accept-Ranges, Content-Type');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+
+  // Check memory cache first
+  if (dubbedMemoryCache.has(filename)) {
+    const item = dubbedMemoryCache.get(filename)!;
+    res.setHeader('Content-Type', item.mimetype);
+    res.setHeader('Content-Length', item.buffer.length);
+    res.setHeader('Accept-Ranges', 'bytes');
+    return res.send(item.buffer);
+  }
+
+  const searchDirs = [
+    activeDubbedDir,
+    path.resolve(process.cwd(), 'uploads', 'dubbed'),
+    path.resolve(process.cwd(), 'uploads'),
+    '/tmp/uploads/dubbed',
+  ];
+  for (const dir of searchDirs) {
+    const p = path.join(dir, filename);
+    if (fs.existsSync(p)) {
+      const stat = fs.statSync(p);
+      const ext = path.extname(p).toLowerCase();
+      const mime = ext === '.mp3' ? 'audio/mpeg' : 'audio/wav';
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Accept-Ranges', 'bytes');
+      return fs.createReadStream(p).pipe(res);
+    }
+  }
+  return res.status(404).json({ error: 'Dubbed audio not found' });
+};
+
+// Mount AI & Multilingual static media routes
+app.get('/uploads/subtitles/:filename', serveSubtitleHandler);
+apiRouter.get('/uploads/subtitles/:filename', serveSubtitleHandler);
+apiRouter.get('/subtitles/:filename', serveSubtitleHandler);
+
+app.get('/uploads/dubbed/:filename', serveDubbedAudioHandler);
+apiRouter.get('/uploads/dubbed/:filename', serveDubbedAudioHandler);
+apiRouter.get('/dubbed/:filename', serveDubbedAudioHandler);
+
+// AI Subtitle Translation Endpoint
+apiRouter.post('/ai/translate-subtitles', async (req: Request, res: Response) => {
+  const { vttContent, text, targetLanguage } = req.body;
+  if (!targetLanguage || typeof targetLanguage !== 'string') {
+    res.status(400).json({ error: 'targetLanguage is required' });
+    return;
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    res.status(503).json({ error: 'Gemini API is not configured on this server.' });
+    return;
+  }
+
+  const ai = new GoogleGenAI();
+  let lastError: any = null;
+
+  // 1. WebVTT subtitle track translation
+  if (vttContent && typeof vttContent === 'string') {
+    const prompt = `Translate all spoken dialogue and cue texts in this WebVTT subtitle track into ${targetLanguage}.
+Strict rules:
+1. Preserve the WebVTT format exactly, including the "WEBVTT" header at the very top.
+2. Keep all timestamps (e.g. 00:00:01.000 --> 00:00:04.000) completely unchanged.
+3. Keep cue identifiers / numbers unchanged.
+4. Only translate the dialogue lines.
+5. Return ONLY the raw WebVTT content, without any markdown formatting, backticks, or explanatory text.`;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: [{ role: 'user', parts: [{ text: `${prompt}\n\n${vttContent}` }] }],
+        });
+
+        let rawVtt = response.text || '';
+        // Clean markdown backticks if returned
+        rawVtt = rawVtt.replace(/^```(?:vtt|webvtt)?\n/i, '').replace(/\n```$/i, '').trim();
+        if (!rawVtt.startsWith('WEBVTT')) {
+          rawVtt = `WEBVTT\n\n${rawVtt}`;
+        }
+
+        const safeLang = targetLanguage.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+        const filename = `sub_${safeLang}_${Date.now()}_${crypto.randomBytes(3).toString('hex')}.vtt`;
+
+        subtitlesMemoryCache.set(filename, rawVtt);
+
+        try {
+          fs.writeFileSync(path.join(activeSubtitlesDir, filename), rawVtt, 'utf8');
+        } catch (e) {
+          console.warn('Could not persist subtitle to disk, cached in memory:', e);
+        }
+
+        res.json({
+          success: true,
+          subtitleUrl: `/uploads/subtitles/${filename}`,
+          language: targetLanguage,
+          label: `${targetLanguage} [AI Translated]`,
+          vttContent: rawVtt,
+        });
+        return;
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[translate-subtitles] Attempt ${attempt} failed:`, err.message);
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+        }
+      }
+    }
+
+    res.status(500).json({ error: `Subtitle translation failed: ${lastError?.message || 'AI request error'}` });
+    return;
+  }
+
+  // 2. Plain text translation
+  if (text && typeof text === 'string') {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: `Translate the following dialogue or text accurately into ${targetLanguage}. Return ONLY the translation, without markdown code fences:\n\n${text}`,
+        });
+        const translatedText = response.text?.trim() || '';
+        res.json({
+          success: true,
+          translatedText,
+          language: targetLanguage,
+          label: `${targetLanguage} [AI Translated]`,
+        });
+        return;
+      } catch (err: any) {
+        lastError = err;
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+        }
+      }
+    }
+    res.status(500).json({ error: `Text translation failed: ${lastError?.message || 'AI request error'}` });
+    return;
+  }
+
+  res.status(400).json({ error: 'Either vttContent or text must be provided.' });
+});
+
+// AI Dubbing Audio Synthesizer Endpoint
+apiRouter.post('/ai/generate-dubbing', async (req: Request, res: Response) => {
+  const { text, targetLanguage, voiceName } = req.body;
+  if (!text || typeof text !== 'string') {
+    res.status(400).json({ error: 'Dialogue or scene text is required' });
+    return;
+  }
+  const lang = targetLanguage || 'English';
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    res.status(503).json({ error: 'Gemini API is not configured on this server.' });
+    return;
+  }
+
+  const ai = new GoogleGenAI();
+  let lastError: any = null;
+  const selectedVoice = voiceName || 'Kore';
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash-lite-tts',
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: text.slice(0, 1500) }],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: selectedVoice },
+            },
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!base64Audio) {
+        throw new Error('TTS model did not return audio data.');
+      }
+
+      const audioBuffer = Buffer.from(base64Audio, 'base64');
+      const safeLang = lang.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      const filename = `dub_${safeLang}_${Date.now()}_${crypto.randomBytes(3).toString('hex')}.wav`;
+
+      dubbedMemoryCache.set(filename, {
+        buffer: audioBuffer,
+        mimetype: 'audio/wav',
+        createdAt: Date.now(),
+      });
+
+      try {
+        fs.writeFileSync(path.join(activeDubbedDir, filename), audioBuffer);
+      } catch (e) {
+        console.warn('Could not persist dubbed audio to disk, cached in memory:', e);
+      }
+
+      res.json({
+        success: true,
+        audioUrl: `/uploads/dubbed/${filename}`,
+        language: lang,
+        label: `${lang} [AI Dubbed]`,
+        voice: selectedVoice,
+        size: audioBuffer.length,
+      });
+      return;
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[generate-dubbing] Attempt ${attempt} failed:`, err.message);
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 1200 * attempt));
+      }
+    }
+  }
+
+  res.status(500).json({ error: `Dubbing generation failed: ${lastError?.message || 'AI request error'}` });
+});
 
 // Mount thumbnail routes
 app.get('/uploads/thumbnails/:filename', serveThumbnailHandler);

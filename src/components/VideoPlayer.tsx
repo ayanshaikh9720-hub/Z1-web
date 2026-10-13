@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Hls from 'hls.js';
 import {
-  Play, Pause, RotateCcw, Volume2, VolumeX, Maximize, Minimize,
+  Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX, Maximize, Minimize,
   Settings, ArrowLeft, AlertCircle, RefreshCw, Languages, Subtitles,
   Check, X, Sparkles, MessageSquare
 } from 'lucide-react';
@@ -503,6 +503,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     resetControlsTimer();
   };
 
+  const handleSeekRelative = (seconds: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const dur = video.duration || 100;
+    const next = Math.max(0, Math.min(dur, video.currentTime + seconds));
+    video.currentTime = next;
+    if (dubbedAudioRef.current && selectedAudioTrackId !== 'original') {
+      dubbedAudioRef.current.currentTime = next;
+    }
+    setCurrentTime(next);
+    resetControlsTimer();
+    triggerToast(seconds > 0 ? `+${seconds}s` : `${seconds}s`);
+  };
+
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const video = videoRef.current;
     const dubbed = dubbedAudioRef.current;
@@ -809,6 +823,56 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         )}
 
+        {/* Quick Center Controls (Play/Pause & 10s Skip) */}
+        {controlsVisible && !isLoading && !hasError && (
+          <div className="absolute inset-0 flex items-center justify-center gap-6 sm:gap-10 pointer-events-none z-20">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleSeekRelative(-10);
+              }}
+              className="pointer-events-auto p-3 sm:p-4 rounded-full bg-black/60 hover:bg-black/80 text-white/90 hover:text-white transition-all transform hover:scale-110 active:scale-95 shadow-xl border border-white/10 flex flex-col items-center justify-center"
+              title="Rewind 10 seconds"
+              aria-label="Rewind 10 seconds"
+            >
+              <RotateCcw className="w-6 h-6 sm:w-7 sm:h-7" />
+              <span className="text-[10px] font-bold block text-center -mt-0.5">10s</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                togglePlay();
+              }}
+              className="pointer-events-auto p-4 sm:p-5 rounded-full bg-red-600 hover:bg-red-500 text-white transition-all transform hover:scale-110 active:scale-95 shadow-2xl shadow-red-950/60 flex items-center justify-center"
+              title={isPlaying ? 'Pause' : 'Play'}
+              aria-label={isPlaying ? 'Pause' : 'Play'}
+            >
+              {isPlaying ? (
+                <Pause className="w-8 h-8 sm:w-10 sm:h-10 fill-current" />
+              ) : (
+                <Play className="w-8 h-8 sm:w-10 sm:h-10 fill-current ml-1" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleSeekRelative(10);
+              }}
+              className="pointer-events-auto p-3 sm:p-4 rounded-full bg-black/60 hover:bg-black/80 text-white/90 hover:text-white transition-all transform hover:scale-110 active:scale-95 shadow-xl border border-white/10 flex flex-col items-center justify-center"
+              title="Forward 10 seconds"
+              aria-label="Forward 10 seconds"
+            >
+              <RotateCw className="w-6 h-6 sm:w-7 sm:h-7" />
+              <span className="text-[10px] font-bold block text-center -mt-0.5">10s</span>
+            </button>
+          </div>
+        )}
+
         {/* Loading Spinner */}
         {isLoading && !hasError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 pointer-events-none">
@@ -1112,19 +1176,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </button>
 
               <button
-                onClick={() => {
-                  if (videoRef.current) {
-                    const next = Math.max(0, videoRef.current.currentTime - 10);
-                    videoRef.current.currentTime = next;
-                    if (dubbedAudioRef.current) dubbedAudioRef.current.currentTime = next;
-                    setCurrentTime(next);
-                  }
-                }}
+                onClick={() => handleSeekRelative(-10)}
                 className="p-2 text-slate-300 hover:text-white transition-colors"
                 title="Rewind 10 seconds (←)"
                 aria-label="Rewind 10 seconds"
               >
                 <RotateCcw className="w-5 h-5" />
+              </button>
+
+              <button
+                onClick={() => handleSeekRelative(10)}
+                className="p-2 text-slate-300 hover:text-white transition-colors"
+                title="Forward 10 seconds (→)"
+                aria-label="Forward 10 seconds"
+              >
+                <RotateCw className="w-5 h-5" />
               </button>
 
               {/* Volume Slider */}
