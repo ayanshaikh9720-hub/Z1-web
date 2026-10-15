@@ -2,11 +2,12 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   Film, Image as ImageIcon, Upload, Check, AlertTriangle, X,
   Lock, Star, Flame, Eye, RefreshCw, CheckCircle2, Shield,
-  Languages, Volume2, Subtitles, Plus, Trash2, Sparkles, Loader2
+  Languages, Volume2, Subtitles, Plus, Trash2, Sparkles, Loader2, Play
 } from 'lucide-react';
-import { Movie, AudioTrack, SubtitleTrack } from '../types';
+import { Movie, AudioTrack, SubtitleTrack, VideoFormatType } from '../types';
 import { api } from '../services/api';
 import { processThumbnailFile, normalizePosterUrl, optimizeImageFile, DEFAULT_POSTER_FALLBACK } from '../utils/imageUtils';
+import { VideoPlayer } from './VideoPlayer';
 
 interface EditMovieModalProps {
   movie: Movie;
@@ -104,13 +105,15 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
 
   // Video Source handling
   const [videoUrl, setVideoUrl] = useState<string>(movie.videoUrl || '');
-  const [videoType, setVideoType] = useState<'mp4' | 'hls' | 'webm'>(movie.videoType || 'mp4');
+  const [videoType, setVideoType] = useState<VideoFormatType>(movie.videoType || 'auto');
+  const [previewVideoModalOpen, setPreviewVideoModalOpen] = useState<boolean>(false);
   const [isVideoUploading, setIsVideoUploading] = useState<boolean>(false);
   const [videoUploadProgress, setVideoUploadProgress] = useState<number>(0);
   const [videoUploadSuccess, setVideoUploadSuccess] = useState<string>('');
   const [videoUploadError, setVideoUploadError] = useState<string>('');
-  const [probeResult, setProbeResult] = useState<{ valid: boolean; message: string; contentType?: string } | null>(null);
+  const [probeResult, setProbeResult] = useState<{ valid: boolean; message: string; contentType?: string; format?: string } | null>(null);
   const [probeLoading, setProbeLoading] = useState<boolean>(false);
+  const [isReencoding, setIsReencoding] = useState<boolean>(false);
   const videoFileInputRef = useRef<HTMLInputElement>(null);
 
   const handleVideoFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -124,7 +127,11 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
 
     try {
       const res = await api.uploadFile(file, (pct) => setVideoUploadProgress(pct));
-      setVideoUploadSuccess(`Video uploaded: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB)`);
+      let successMsg = `Video uploaded: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB)`;
+      if (res.needsTranscode) {
+        successMsg += ` · Codec conversion to H.264 + AAC initiated (${res.videoCodec || ''}/${res.audioCodec || ''})`;
+      }
+      setVideoUploadSuccess(successMsg);
       setVideoUrl(res.url);
       setVideoType(res.url.endsWith('.m3u8') ? 'hls' : 'mp4');
     } catch (err: any) {
@@ -141,6 +148,9 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
     try {
       const res = await api.validateVideoUrl(videoUrl.trim());
       setProbeResult(res);
+      if (res.valid && res.format && videoType === 'auto') {
+        setVideoType(res.format as VideoFormatType);
+      }
     } catch (err: any) {
       setProbeResult({ valid: false, message: err.message || 'Stream verification failed' });
     } finally {
@@ -363,7 +373,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
         audioTracks: audioTracks.filter((t) => t.language && t.url),
         subtitleTracks: subtitleTracks.filter((s) => s.language && s.src),
         videoUrl: videoUrl.trim() || movie.videoUrl,
-        videoType: (videoUrl.trim() || movie.videoUrl).endsWith('.m3u8') ? 'hls' : videoType,
+        videoType: videoType || movie.videoType || 'auto',
         downloadUrls: movie.downloadUrls || [],
         updatedAt: new Date().toISOString(),
       };
@@ -1431,44 +1441,77 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
               </span>
             </div>
 
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-slate-300">
-                Stream / Master Video URL
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={videoUrl}
-                  onChange={(e) => {
-                    setVideoUrl(e.target.value);
-                    setProbeResult(null);
-                  }}
-                  placeholder="https://firebasestorage.googleapis.com/... or /uploads/..."
-                  className="flex-1 bg-black/50 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-slate-600 focus:outline-none focus:border-red-500"
-                />
-                <button
-                  type="button"
-                  onClick={handleVerifyVideoUrl}
-                  disabled={probeLoading || !videoUrl.trim()}
-                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition-colors shrink-0"
-                >
-                  {probeLoading ? 'Probing...' : 'Verify Stream'}
-                </button>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="sm:col-span-2 space-y-1.5">
+                <label className="block text-xs font-semibold text-slate-300">
+                  Stream / Master Video URL *
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={videoUrl}
+                    onChange={(e) => {
+                      setVideoUrl(e.target.value);
+                      setProbeResult(null);
+                    }}
+                    placeholder="https://... or /uploads/..."
+                    className="flex-1 bg-black/50 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-slate-600 focus:outline-none focus:border-red-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleVerifyVideoUrl}
+                    disabled={probeLoading || !videoUrl.trim()}
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition-colors shrink-0"
+                  >
+                    {probeLoading ? 'Probing...' : 'Verify'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewVideoModalOpen(true)}
+                    disabled={!videoUrl.trim()}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-red-950/40 shrink-0"
+                    title="Preview stream in Universal Video Player"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Preview</span>
+                  </button>
+                </div>
               </div>
 
-              {probeResult && (
-                <div
-                  className={`p-2.5 rounded-xl border text-xs flex items-center gap-2 ${
-                    probeResult.valid
-                      ? 'bg-emerald-950/40 border-emerald-800 text-emerald-300'
-                      : 'bg-red-950/40 border-red-800 text-red-300'
-                  }`}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-slate-300">
+                  Video Format Selector
+                </label>
+                <select
+                  value={videoType}
+                  onChange={(e) => setVideoType(e.target.value as VideoFormatType)}
+                  className="w-full bg-black/50 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-red-500"
                 >
-                  {probeResult.valid ? <Check className="w-3.5 h-3.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
-                  <span>{probeResult.message}</span>
-                </div>
-              )}
+                  <option value="auto">Auto Detect (Default)</option>
+                  <option value="mp4">Direct MP4 Video</option>
+                  <option value="hls">HLS Stream (.m3u8)</option>
+                  <option value="dash">MPEG-DASH (.mpd)</option>
+                  <option value="webm">WebM Video</option>
+                  <option value="mov">MOV / QuickTime</option>
+                </select>
+                <p className="text-[10px] text-slate-500">
+                  Auto Detect automatically handles MP4, HLS, DASH, WebM & MOV.
+                </p>
+              </div>
             </div>
+
+            {probeResult && (
+              <div
+                className={`p-2.5 rounded-xl border text-xs flex items-center gap-2 ${
+                  probeResult.valid
+                    ? 'bg-emerald-950/40 border-emerald-800 text-emerald-300'
+                    : 'bg-red-950/40 border-red-800 text-red-300'
+                }`}
+              >
+                {probeResult.valid ? <Check className="w-3.5 h-3.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+                <span>{probeResult.message}</span>
+              </div>
+            )}
 
             {/* Trailer URL Field */}
             <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
@@ -1492,7 +1535,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
               <div className="text-xs text-slate-400">
                 Need to replace the video with a new master file?
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <input
                   ref={videoFileInputRef}
                   type="file"
@@ -1503,11 +1546,36 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                 <button
                   type="button"
                   onClick={() => videoFileInputRef.current?.click()}
-                  disabled={isVideoUploading}
+                  disabled={isVideoUploading || isReencoding}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-850 text-slate-200 hover:text-white text-xs font-semibold rounded-xl border border-slate-700 transition-colors"
                 >
                   <Upload className="w-3.5 h-3.5 text-red-400" />
                   <span>{isVideoUploading ? 'Uploading Video...' : 'Replace Video File'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      setIsReencoding(true);
+                      setVideoUploadError('');
+                      setVideoUploadSuccess(`Starting compatibility re-encode for "${movie.title}"...`);
+                      const res = await api.reencodeMovie(movie.id);
+                      if (res.success) {
+                        setVideoUploadSuccess(`Re-encoding "${movie.title}" to H.264 + AAC in the background.`);
+                      }
+                    } catch (err: any) {
+                      setVideoUploadError(`Re-encode failed: ${err.message}`);
+                    } finally {
+                      setIsReencoding(false);
+                    }
+                  }}
+                  disabled={isReencoding || isVideoUploading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-950/50 hover:bg-sky-900/60 active:bg-sky-850 text-sky-300 hover:text-white text-xs font-semibold rounded-xl border border-sky-800/60 transition-colors"
+                  title="Re-encode current video to mobile-friendly H.264 + AAC"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-sky-400 ${isReencoding ? 'animate-spin' : ''}`} />
+                  <span>{isReencoding ? 'Re-encoding...' : 'Re-encode for compatibility'}</span>
                 </button>
               </div>
             </div>
@@ -1572,6 +1640,40 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Admin Video Stream Live Preview Modal */}
+      {previewVideoModalOpen && (
+        <div className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-md flex flex-col">
+          <div className="p-3 bg-slate-900 border-b border-slate-800 flex items-center justify-between text-xs text-slate-200">
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-white">Stream Preview:</span>
+              <span className="font-mono text-red-400 truncate max-w-md">{videoUrl || movie.videoUrl}</span>
+              <span className="text-[10px] uppercase bg-slate-800 px-2 py-0.5 rounded text-slate-300 font-semibold border border-slate-700">
+                Format: {videoType.toUpperCase()}
+              </span>
+            </div>
+            <button
+              onClick={() => setPreviewVideoModalOpen(false)}
+              className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold transition-colors"
+            >
+              Close Preview
+            </button>
+          </div>
+          <div className="flex-1 relative">
+            <VideoPlayer
+              movie={{
+                ...movie,
+                videoUrl: videoUrl.trim() || movie.videoUrl,
+                videoType,
+                posterUrl: thumbnailChanged && newThumbnailPreview ? newThumbnailPreview : currentPosterUrl,
+                subtitleTracks,
+                audioTracks,
+              }}
+              onClose={() => setPreviewVideoModalOpen(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

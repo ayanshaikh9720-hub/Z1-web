@@ -33,7 +33,7 @@ import {
   getDownloadURL,
 } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { Movie, User, DownloadOption, AdminStats } from '../types';
+import { Movie, User, DownloadOption, AdminStats, VideoFormatType } from '../types';
 import { processThumbnailFile, normalizePosterUrl } from '../utils/imageUtils';
 import { getSafeVideoUrl } from '../utils/videoUrlHelper';
 
@@ -1044,35 +1044,40 @@ export const firebaseApi = {
   },
 
   // 13. Video URL Probe (client-side reachable check)
-  validateVideoUrl: async (url: string): Promise<{ valid: boolean; message: string; contentType?: string }> => {
+  validateVideoUrl: async (url: string): Promise<{ valid: boolean; message: string; contentType?: string; format?: VideoFormatType }> => {
     if (!url || typeof url !== 'string') {
-      return { valid: false, message: 'URL is required' };
+      return { valid: false, message: 'URL is required', format: 'auto' };
     }
 
     const validation = getSafeVideoUrl(url);
     if (!validation.valid) {
-      return { valid: false, message: validation.error || 'Video URL is invalid or blocked for security' };
+      return { valid: false, message: validation.error || 'Video URL is invalid or blocked for security', format: 'auto' };
     }
 
     // Client Blob URLs are in-memory objects and valid for session
     if (validation.isBlob) {
-      return { valid: true, message: 'Valid temporary session video stream (ready for streaming)', contentType: 'video/mp4' };
+      return { valid: true, message: 'Valid temporary session video stream (ready for streaming)', contentType: 'video/mp4', format: validation.format };
     }
 
     // Fast check for HLS streams
     if (validation.isHls) {
-      return { valid: true, message: 'Valid HLS stream endpoint detected', contentType: 'application/vnd.apple.mpegurl' };
+      return { valid: true, message: 'Valid HLS stream endpoint detected', contentType: 'application/vnd.apple.mpegurl', format: 'hls' };
+    }
+
+    // Fast check for DASH streams
+    if (validation.isDash) {
+      return { valid: true, message: 'Valid MPEG-DASH manifest detected', contentType: 'application/dash+xml', format: 'dash' };
     }
 
     // Firebase Storage or Google Cloud Storage URLs:
     // They are valid HTTPS authorized media URLs with tokens (HEAD might fail due to storage bucket CORS)
     if (validation.isFirebaseStorage) {
-      return { valid: true, message: 'Firebase Storage video stream verified and ready', contentType: 'video/mp4' };
+      return { valid: true, message: 'Firebase Storage video stream verified and ready', contentType: 'video/mp4', format: validation.format || 'mp4' };
     }
 
     // Server-hosted local uploads (/uploads/...)
     if (validation.isLocalUpload) {
-      return { valid: true, message: 'Server-hosted video file verified and ready', contentType: 'video/mp4' };
+      return { valid: true, message: 'Server-hosted video file verified and ready', contentType: 'video/mp4', format: validation.format || 'mp4' };
     }
 
     try {
@@ -1083,7 +1088,7 @@ export const firebaseApi = {
 
       if (response.ok || response.status === 206 || response.status === 200) {
         const ct = response.headers.get('content-type') || 'video/mp4';
-        return { valid: true, message: 'Video stream verified and playable', contentType: ct };
+        return { valid: true, message: 'Video stream verified and playable', contentType: ct, format: validation.format };
       }
     } catch {
       // If CORS blocks HEAD request, test if audio/video tag can load metadata
@@ -1096,13 +1101,13 @@ export const firebaseApi = {
 
       const timer = setTimeout(() => {
         video.src = '';
-        resolve({ valid: true, message: 'Video URL format accepted' });
+        resolve({ valid: true, message: 'Video URL format accepted', format: validation.format });
       }, 4000);
 
       video.onloadedmetadata = () => {
         clearTimeout(timer);
         video.src = '';
-        resolve({ valid: true, message: 'Video metadata successfully loaded and playable' });
+        resolve({ valid: true, message: 'Video metadata successfully loaded and playable', format: validation.format });
       };
 
       video.onerror = () => {
@@ -1110,9 +1115,9 @@ export const firebaseApi = {
         video.src = '';
         // If it's a valid remote HTTPS URL that can play direct or via stream proxy, do not block it unnecessarily
         if (validation.safeUrl.startsWith('https://') || validation.safeUrl.startsWith('http://')) {
-          resolve({ valid: true, message: 'Remote video stream accepted (stream proxy fallback enabled)' });
+          resolve({ valid: true, message: 'Remote video stream accepted (stream proxy fallback enabled)', format: validation.format });
         } else {
-          resolve({ valid: false, message: 'Video stream could not be loaded by browser player' });
+          resolve({ valid: false, message: 'Video stream could not be loaded by browser player', format: validation.format });
         }
       };
     });

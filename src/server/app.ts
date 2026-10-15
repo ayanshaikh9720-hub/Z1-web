@@ -6,7 +6,17 @@ import http from 'http';
 import https from 'https';
 import multer from 'multer';
 import { GoogleGenAI } from '@google/genai';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegPath from 'ffmpeg-static';
+import ffprobeStatic from 'ffprobe-static';
 import { loadDB, saveDB, getInitialSeedData, authenticateUser, generateToken, verifyToken, TokenPayload } from './db';
+
+if (ffmpegPath) {
+  ffmpeg.setFfmpegPath(ffmpegPath);
+}
+if (ffprobeStatic && ffprobeStatic.path) {
+  ffmpeg.setFfprobePath(ffprobeStatic.path);
+}
 
 const app = express();
 
@@ -170,12 +180,39 @@ function adminMiddleware(req: Request, res: Response, next: NextFunction) {
   });
 }
 
+function detectFormatFromResponse(url: string, contentType: string): 'hls' | 'dash' | 'mp4' | 'webm' | 'mov' | 'unknown' {
+  const lowerCt = (contentType || '').toLowerCase();
+  const lowerUrl = url.toLowerCase();
+
+  if (lowerCt.includes('application/vnd.apple.mpegurl') || lowerCt.includes('application/x-mpegurl') || lowerUrl.includes('.m3u8')) {
+    return 'hls';
+  }
+  if (lowerCt.includes('application/dash+xml') || lowerUrl.includes('.mpd')) {
+    return 'dash';
+  }
+  if (lowerCt.includes('video/webm') || lowerUrl.includes('.webm')) {
+    return 'webm';
+  }
+  if (lowerCt.includes('video/quicktime') || lowerUrl.includes('.mov')) {
+    return 'mov';
+  }
+  if (lowerCt.includes('video/mp4') || lowerUrl.includes('.mp4')) {
+    return 'mp4';
+  }
+  if (lowerCt.startsWith('video/')) {
+    return 'mp4';
+  }
+  return 'unknown';
+}
+
 // Video Probe helper
 function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
   valid: boolean;
   status: number;
   contentType: string;
   contentLength?: string;
+  format: 'hls' | 'dash' | 'mp4' | 'webm' | 'mov' | 'unknown';
+  resolvedUrl: string;
   message: string;
 }> {
   return new Promise((resolve) => {
@@ -212,19 +249,25 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
 
           probeRes.destroy();
 
+          const detectedFormat = detectFormatFromResponse(targetUrl, contentType);
+
           if (statusCode === 200 || statusCode === 206) {
             resolve({
               valid: true,
               status: statusCode,
               contentType,
               contentLength,
-              message: 'Video stream verified and playable by browser',
+              format: detectedFormat,
+              resolvedUrl: targetUrl,
+              message: `Video stream verified (${detectedFormat.toUpperCase()}) and playable by browser`,
             });
           } else {
             resolve({
               valid: false,
               status: statusCode,
               contentType,
+              format: detectedFormat,
+              resolvedUrl: targetUrl,
               message: `Remote server returned HTTP ${statusCode}`,
             });
           }
@@ -236,6 +279,8 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
           valid: false,
           status: 0,
           contentType: '',
+          format: 'unknown',
+          resolvedUrl: targetUrl,
           message: `Network probe failed: ${err.message}`,
         });
       });
@@ -246,6 +291,8 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
           valid: false,
           status: 408,
           contentType: '',
+          format: 'unknown',
+          resolvedUrl: targetUrl,
           message: 'Video URL verification timed out (8s)',
         });
       });
@@ -256,6 +303,8 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
         valid: false,
         status: 400,
         contentType: '',
+        format: 'unknown',
+        resolvedUrl: targetUrl,
         message: `Invalid URL: ${err.message}`,
       });
     }
@@ -488,12 +537,17 @@ apiRouter.post('/validate-video-url', async (req: Request, res: Response) => {
     const filePath = path.join(activeUploadsDir, path.basename(url));
     if (fs.existsSync(filePath)) {
       const stat = fs.statSync(filePath);
+      const ext = path.extname(filePath).toLowerCase();
+      const format = ext === '.m3u8' ? 'hls' : ext === '.mpd' ? 'dash' : ext === '.webm' ? 'webm' : ext === '.mov' ? 'mov' : 'mp4';
+      const contentType = ext === '.m3u8' ? 'application/vnd.apple.mpegurl' : ext === '.mpd' ? 'application/dash+xml' : ext === '.webm' ? 'video/webm' : 'video/mp4';
       res.json({
         valid: true,
         status: 200,
-        contentType: 'video/mp4',
+        contentType,
+        format,
         size: stat.size,
-        message: 'Local video file verified on server storage',
+        resolvedUrl: url,
+        message: `Local video stream (${format.toUpperCase()}) verified on server storage`,
       });
       return;
     } else {
@@ -913,8 +967,289 @@ apiRouter.post('/upload-thumbnail', handleThumbnailMulter, async (req: Request, 
   }
 });
 
-// 18. Video Upload Endpoint
-apiRouter.post('/upload', handleVideoMulter, (req: Request, res: Response) => {
+// ----------------- VIDEO CODEC PROBE & TRANSCODING ENGINE ----------------- //
+
+interface CodecInfo {
+  videoCodec: string;
+  audioCodec: string;
+  isH264: boolean;
+  isAac: boolean;
+  needsTranscode: boolean;
+  duration: number;
+  audioIndex?: number;
+}
+
+interface TranscodeJobState {
+  jobId: string;
+  movieId?: string;
+  inputPath: string;
+  outputPath: string;
+  outputUrl: string;
+  status: 'processing' | 'ready' | 'failed';
+  progress: number;
+  error?: string;
+  videoCodec: string;
+  audioCodec: string;
+  startedAt: number;
+}
+
+const transcodeJobs = new Map<string, TranscodeJobState>();
+
+function probeLocalVideoCodecs(filePath: string): Promise<CodecInfo> {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(filePath)) {
+      return resolve({
+        videoCodec: '',
+        audioCodec: '',
+        isH264: false,
+        isAac: false,
+        needsTranscode: true,
+        duration: 0,
+      });
+    }
+
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err || !metadata || !metadata.streams) {
+        console.warn('[FFprobe] Probe failed or no streams:', err?.message);
+        return resolve({
+          videoCodec: '',
+          audioCodec: '',
+          isH264: false,
+          isAac: false,
+          needsTranscode: true,
+          duration: 0,
+        });
+      }
+
+      const vStream = metadata.streams.find((s) => s.codec_type === 'video');
+      const audioStreams = metadata.streams.filter((s) => s.codec_type === 'audio');
+
+      // If multiple audio tracks exist, prefer Hindi or English, otherwise keep the first
+      let chosenAudioStream = audioStreams[0];
+      const preferred = audioStreams.find((s) => {
+        const lang = (s.tags?.language || s.tags?.title || s.tags?.handler_name || '').toLowerCase();
+        return lang.includes('hin') || lang.includes('eng');
+      });
+      if (preferred) {
+        chosenAudioStream = preferred;
+      }
+
+      const videoCodec = (vStream?.codec_name || '').toLowerCase();
+      const audioCodec = (chosenAudioStream?.codec_name || '').toLowerCase();
+      const duration = parseFloat((metadata.format?.duration as any) || '0');
+      const audioIndex = chosenAudioStream ? chosenAudioStream.index : undefined;
+
+      const isH264 = videoCodec === 'h264' || videoCodec === 'avc1';
+      const isAac = audioCodec === 'aac';
+      const needsTranscode = !isH264 || !isAac;
+
+      console.log(
+        `[FFprobe] Probed "${path.basename(filePath)}": Video=${videoCodec} (${isH264 ? 'H.264' : 'Non-H.264'}), Audio=${audioCodec} (${isAac ? 'AAC' : 'Non-AAC'}), audioIndex=${audioIndex}, needsTranscode=${needsTranscode}`
+      );
+
+      resolve({
+        videoCodec,
+        audioCodec,
+        isH264,
+        isAac,
+        needsTranscode,
+        duration,
+        audioIndex,
+      });
+    });
+  });
+}
+
+function executeTranscode(
+  inputPath: string,
+  options: { movieId?: string; targetFilename?: string }
+): Promise<string> {
+  const jobId = options.movieId || `job_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  const baseName = options.targetFilename
+    ? path.basename(options.targetFilename, path.extname(options.targetFilename))
+    : path.basename(inputPath, path.extname(inputPath));
+  const safeBase = baseName.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'video';
+  const outputFilename = `compat_${safeBase}_${Date.now()}.mp4`;
+  const outputPath = path.join(activeUploadsDir, outputFilename);
+  const outputUrl = `/uploads/${outputFilename}`;
+
+  const jobState: TranscodeJobState = {
+    jobId,
+    movieId: options.movieId,
+    inputPath,
+    outputPath,
+    outputUrl,
+    status: 'processing',
+    progress: 0,
+    videoCodec: '',
+    audioCodec: '',
+    startedAt: Date.now(),
+  };
+  transcodeJobs.set(jobId, jobState);
+
+  // Update DB movie record status to 'processing'
+  if (options.movieId) {
+    const db = loadDB();
+    const movie = db.movies.find((m) => m.id === options.movieId);
+    if (movie) {
+      movie.status = 'processing';
+      movie.transcodeProgress = 0;
+      movie.transcodeError = undefined;
+      saveDB(db);
+    }
+  }
+
+  return new Promise(async (resolve, reject) => {
+    try {
+      const probe = await probeLocalVideoCodecs(inputPath);
+      jobState.videoCodec = probe.videoCodec;
+      jobState.audioCodec = probe.audioCodec;
+
+      const cmd = ffmpeg(inputPath);
+      const audioMap = probe.audioIndex !== undefined ? `0:${probe.audioIndex}?` : '0:a:0?';
+
+      if (probe.isH264 && !probe.isAac) {
+        // Video is already H.264, only transcode audio to AAC
+        cmd.outputOptions([
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '128k',
+          '-ac', '2',
+          '-map', '0:v:0',
+          '-map', audioMap,
+          '-movflags', '+faststart',
+        ]);
+      } else {
+        // Full transcode to mobile-safe H.264 + AAC
+        cmd.outputOptions([
+          '-c:v', 'libx264',
+          '-preset', 'veryfast',
+          '-crf', '23',
+          '-pix_fmt', 'yuv420p',
+          '-profile:v', 'high',
+          '-level', '4.1',
+          '-c:a', 'aac',
+          '-b:a', '128k',
+          '-ac', '2',
+          '-map', '0:v:0',
+          '-map', audioMap,
+          '-movflags', '+faststart',
+        ]);
+      }
+
+      cmd.on('progress', (progress) => {
+        const pct = Math.min(99, Math.max(1, Math.round(progress.percent || 0)));
+        jobState.progress = pct;
+        if (options.movieId) {
+          const db = loadDB();
+          const movie = db.movies.find((m) => m.id === options.movieId);
+          if (movie && movie.transcodeProgress !== pct) {
+            movie.transcodeProgress = pct;
+            saveDB(db);
+          }
+        }
+      });
+
+      cmd.on('end', () => {
+        console.log(`[FFmpeg] Transcode finished successfully: ${outputPath}`);
+        jobState.status = 'ready';
+        jobState.progress = 100;
+
+        if (options.movieId) {
+          const db = loadDB();
+          const movie = db.movies.find((m) => m.id === options.movieId);
+          if (movie) {
+            movie.videoUrl = outputUrl;
+            movie.videoType = 'mp4';
+            movie.status = 'ready';
+            movie.transcodeProgress = 100;
+            movie.transcodeError = undefined;
+            movie.updatedAt = new Date().toISOString();
+            saveDB(db);
+          }
+        }
+
+        // Replace original file if it was a distinct uploaded file in activeUploadsDir
+        if (inputPath !== outputPath && fs.existsSync(inputPath) && inputPath.startsWith(activeUploadsDir)) {
+          try {
+            // Keep original safe if it's named as a seed or sample, otherwise clean up
+            if (!path.basename(inputPath).startsWith('sintel')) {
+              fs.unlinkSync(inputPath);
+              console.log(`[FFmpeg] Cleaned up original non-compatible file: ${path.basename(inputPath)}`);
+            }
+          } catch (delErr) {
+            console.warn('[FFmpeg] Could not delete original file after transcode:', delErr);
+          }
+        }
+
+        resolve(outputUrl);
+      });
+
+      cmd.on('error', (err) => {
+        console.error(`[FFmpeg] Transcode error for ${inputPath}:`, err.message);
+        jobState.status = 'failed';
+        jobState.error = err.message;
+
+        if (options.movieId) {
+          const db = loadDB();
+          const movie = db.movies.find((m) => m.id === options.movieId);
+          if (movie) {
+            movie.status = 'failed';
+            movie.transcodeError = err.message;
+            movie.updatedAt = new Date().toISOString();
+            saveDB(db);
+          }
+        }
+
+        reject(err);
+      });
+
+      cmd.save(outputPath);
+    } catch (err: any) {
+      jobState.status = 'failed';
+      jobState.error = err.message;
+      reject(err);
+    }
+  });
+}
+
+async function downloadRemoteVideoToTemp(url: string, targetPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'https:' ? https : http;
+    const fileStream = fs.createWriteStream(targetPath);
+
+    function doRequest(currentUrl: string, redirects = 0) {
+      if (redirects > 5) {
+        return reject(new Error('Too many redirects while downloading remote video'));
+      }
+      const req = client.get(currentUrl, (res) => {
+        if (res.statusCode && [301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+          const next = new URL(res.headers.location, currentUrl).toString();
+          return doRequest(next, redirects + 1);
+        }
+        if (res.statusCode && res.statusCode >= 400) {
+          return reject(new Error(`Failed to download remote video: HTTP ${res.statusCode}`));
+        }
+        res.pipe(fileStream);
+        fileStream.on('finish', () => {
+          fileStream.close();
+          resolve();
+        });
+      });
+      req.on('error', reject);
+      req.setTimeout(60000, () => {
+        req.destroy();
+        reject(new Error('Timeout downloading remote video'));
+      });
+    }
+
+    doRequest(url);
+  });
+}
+
+// 18. Video Upload Endpoint with Codec Check & Auto-Transcoding
+apiRouter.post('/upload', handleVideoMulter, async (req: Request, res: Response) => {
   const files = req.files as Express.Multer.File[] | undefined;
   const file = req.file || (files && files.length > 0 ? files[0] : null);
 
@@ -924,16 +1259,183 @@ apiRouter.post('/upload', handleVideoMulter, (req: Request, res: Response) => {
 
   const uploadedUrl = `/uploads/${file.filename}`;
   const isVideo = file.mimetype?.startsWith('video/') || file.originalname.match(/\.(mp4|webm|mkv|m3u8)$/i);
+  const localFilePath = path.join(activeUploadsDir, file.filename);
 
-  return res.json({
+  if (IS_VERCEL) {
+    return res.json({
+      success: true,
+      url: uploadedUrl,
+      filename: file.filename,
+      originalName: file.originalname,
+      size: file.size,
+      mimetype: file.mimetype,
+      isVideo: Boolean(isVideo),
+      status: 'ready',
+      needsTranscode: false,
+      message: 'Video uploaded. (Note: On Vercel serverless, transcoding is skipped. Please ensure H.264+AAC compatibility).',
+    });
+  }
+
+  // Probe codec compatibility
+  try {
+    const probe = await probeLocalVideoCodecs(localFilePath);
+    if (probe.needsTranscode) {
+      console.log(`[Upload] Non-standard codec detected for ${file.originalname}: Video=${probe.videoCodec}, Audio=${probe.audioCodec}. Auto-transcoding...`);
+
+      // Start background transcode
+      executeTranscode(localFilePath, { targetFilename: file.originalname }).catch((err) => {
+        console.error('[Upload Auto-transcode Error]:', err);
+      });
+
+      return res.json({
+        success: true,
+        url: uploadedUrl,
+        filename: file.filename,
+        originalName: file.originalname,
+        size: file.size,
+        mimetype: file.mimetype,
+        isVideo: Boolean(isVideo),
+        status: 'processing',
+        needsTranscode: true,
+        transcodeProgress: 0,
+        videoCodec: probe.videoCodec,
+        audioCodec: probe.audioCodec,
+        message: `Video uploaded. Non-H.264/AAC codec detected (${probe.videoCodec || 'unknown'} / ${probe.audioCodec || 'unknown'}). Auto-transcoding to mobile-compatible MP4 (H.264 + AAC)...`,
+      });
+    }
+
+    return res.json({
+      success: true,
+      url: uploadedUrl,
+      filename: file.filename,
+      originalName: file.originalname,
+      size: file.size,
+      mimetype: file.mimetype,
+      isVideo: Boolean(isVideo),
+      status: 'ready',
+      needsTranscode: false,
+      transcodeProgress: 100,
+      videoCodec: probe.videoCodec,
+      audioCodec: probe.audioCodec,
+      message: 'Video uploaded and verified H.264 + AAC compatible.',
+    });
+  } catch (probeErr: any) {
+    console.warn('[Upload] Codec probe error:', probeErr.message);
+    return res.json({
+      success: true,
+      url: uploadedUrl,
+      filename: file.filename,
+      originalName: file.originalname,
+      size: file.size,
+      mimetype: file.mimetype,
+      isVideo: Boolean(isVideo),
+      status: 'ready',
+      message: 'File stored and ready for playback',
+    });
+  }
+});
+
+// 18b. Re-encode movie for compatibility
+apiRouter.post('/movies/:id/transcode', async (req: Request, res: Response) => {
+  if (IS_VERCEL) {
+    return res.status(400).json({
+      error: 'Transcoding is not supported on Vercel serverless. Please upload H.264+AAC encoded video.',
+      isVercel: true,
+    });
+  }
+
+  const db = loadDB();
+  const movie = db.movies.find((m) => m.id === req.params.id);
+  if (!movie) {
+    return res.status(404).json({ error: 'Movie not found' });
+  }
+
+  // Check if already running
+  const existingJob = transcodeJobs.get(movie.id);
+  if (existingJob && existingJob.status === 'processing') {
+    return res.json({
+      success: true,
+      message: 'Transcode is already in progress',
+      status: 'processing',
+      progress: existingJob.progress,
+      movie,
+    });
+  }
+
+  movie.status = 'processing';
+  movie.transcodeProgress = 1;
+  movie.transcodeError = undefined;
+  saveDB(db);
+
+  res.json({
     success: true,
-    url: uploadedUrl,
-    filename: file.filename,
-    originalName: file.originalname,
-    size: file.size,
-    mimetype: file.mimetype,
-    isVideo: Boolean(isVideo),
-    message: 'File successfully stored and ready for playback',
+    message: `Started compatibility re-encoding for "${movie.title}"`,
+    status: 'processing',
+    progress: 1,
+    movie,
+  });
+
+  // Run in background
+  (async () => {
+    try {
+      let localInputPath = '';
+      if (movie.videoUrl.startsWith('/uploads/')) {
+        const fname = path.basename(movie.videoUrl);
+        const searchDirs = [activeUploadsDir, path.resolve(process.cwd(), 'uploads'), '/tmp/uploads'];
+        for (const dir of searchDirs) {
+          const p = path.join(dir, fname);
+          if (fs.existsSync(p)) {
+            localInputPath = p;
+            break;
+          }
+        }
+      }
+
+      if (!localInputPath) {
+        // Download remote video or copy to temporary file
+        const tempSource = path.join('/tmp', `temp_src_${movie.id}_${Date.now()}.mp4`);
+        await downloadRemoteVideoToTemp(movie.videoUrl, tempSource);
+        localInputPath = tempSource;
+      }
+
+      await executeTranscode(localInputPath, { movieId: movie.id, targetFilename: movie.title });
+    } catch (err: any) {
+      console.error(`[Re-encode Error] Movie ${movie.id}:`, err);
+      const db2 = loadDB();
+      const m2 = db2.movies.find((m) => m.id === movie.id);
+      if (m2) {
+        m2.status = 'failed';
+        m2.transcodeError = err.message || 'Transcode failed';
+        saveDB(db2);
+      }
+    }
+  })();
+});
+
+// 18c. Get transcode status for movie
+apiRouter.get('/movies/:id/transcode-status', (req: Request, res: Response) => {
+  const db = loadDB();
+  const movie = db.movies.find((m) => m.id === req.params.id);
+  if (!movie) {
+    return res.status(404).json({ error: 'Movie not found' });
+  }
+
+  const job = transcodeJobs.get(movie.id);
+  const status = job?.status || movie.status || 'ready';
+  const progress =
+    job?.progress !== undefined
+      ? job.progress
+      : movie.transcodeProgress !== undefined
+      ? movie.transcodeProgress
+      : 100;
+  const error = job?.error || movie.transcodeError;
+
+  res.json({
+    success: true,
+    status,
+    progress,
+    error,
+    videoUrl: movie.videoUrl,
   });
 });
 

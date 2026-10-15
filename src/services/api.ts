@@ -449,7 +449,6 @@ export const api = {
     });
   },
 
-  // Local/Direct File Upload handler
   uploadFile: (file: File, onProgress?: (pct: number) => void): Promise<{
     success: boolean;
     url: string;
@@ -459,6 +458,11 @@ export const api = {
     mimetype: string;
     isVideo: boolean;
     message: string;
+    status?: 'processing' | 'ready' | 'failed';
+    needsTranscode?: boolean;
+    transcodeProgress?: number;
+    videoCodec?: string;
+    audioCodec?: string;
   }> => {
     return new Promise((resolve, reject) => {
       const formData = new FormData();
@@ -489,6 +493,11 @@ export const api = {
                 mimetype: data.mimetype || file.type || 'video/mp4',
                 isVideo: true,
                 message: data.message || 'Video file uploaded and ready for streaming',
+                status: data.status || 'ready',
+                needsTranscode: Boolean(data.needsTranscode),
+                transcodeProgress: data.transcodeProgress ?? (data.status === 'processing' ? 0 : 100),
+                videoCodec: data.videoCodec,
+                audioCodec: data.audioCodec,
               });
               return;
             }
@@ -740,6 +749,43 @@ export const api = {
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.error || `Dubbing generation failed (HTTP ${res.status})`);
+    }
+    return res.json();
+  },
+
+  // ---------------- TRANSCODING & CODEC COMPATIBILITY ---------------- //
+  reencodeMovie: async (movieId: string): Promise<{
+    success: boolean;
+    message: string;
+    status: 'processing' | 'ready' | 'failed';
+    progress: number;
+    movie?: Movie;
+  }> => {
+    const token = authStorage.getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`/api/movies/${movieId}/transcode`, {
+      method: 'POST',
+      headers,
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `Re-encoding failed (HTTP ${res.status})`);
+    }
+    return res.json();
+  },
+
+  getTranscodeStatus: async (movieId: string): Promise<{
+    success: boolean;
+    status: 'processing' | 'ready' | 'failed';
+    progress: number;
+    error?: string;
+    videoUrl?: string;
+  }> => {
+    const res = await fetch(`/api/movies/${movieId}/transcode-status`);
+    if (!res.ok) {
+      return { success: false, status: 'ready', progress: 100 };
     }
     return res.json();
   },

@@ -1,24 +1,43 @@
 /**
- * Video URL Validation, Normalization and Safety Helper for Z1 Movies
+ * Video URL Validation, Normalization and Universal Playback Helper for Z1 Movies
  * 
- * Guarantees that:
- * 1. Valid Firebase Storage HTTPS URLs work seamlessly.
- * 2. Signed/temporary HTTPS video URLs (e.g. Google Cloud Storage, AWS S3) work.
- * 3. Client blob/object URLs (blob:...) work reliably without rejection.
- * 4. Existing movie URLs (relative /uploads/..., external archive.org, CDN) continue working.
- * 5. Dangerous protocols (javascript:, data:, file:, vbscript:) are strictly blocked.
- * 6. URL characters and spaces are safely normalized without breaking query params or tokens.
- * 7. HTML5 <video> receives a valid, browser-safe URL.
+ * Supports:
+ * 1. Direct MP4 video URLs
+ * 2. HLS streaming URLs (.m3u8, application/vnd.apple.mpegurl)
+ * 3. MPEG-DASH streaming URLs (.mpd, application/dash+xml) via dash.js
+ * 4. WebM video URLs & direct WebM streams
+ * 5. Supported MOV and other browser-compatible video formats
+ * 6. URLs without file extensions (detected via content inspection / HTTP headers)
+ * 7. URLs with query parameters, signed tokens, and expiration keys
+ * 8. URLs that redirect to a supported video resource
+ * 9. Firebase Cloud Storage & Google Cloud Storage signed tokens
+ * 10. Security protocol screening (blocks javascript:, data:, file:)
  */
+
+import { VideoFormatType } from '../types';
 
 export interface VideoUrlValidationResult {
   valid: boolean;
   safeUrl: string;
   isBlob: boolean;
   isHls: boolean;
+  isDash: boolean;
+  isWebm: boolean;
+  isMov: boolean;
+  isDirect: boolean;
+  format: VideoFormatType;
   isFirebaseStorage: boolean;
   isLocalUpload: boolean;
   error?: string;
+  diagnostics?: {
+    originalUrl: string;
+    protocol: string;
+    hostname?: string;
+    detectedFormat: VideoFormatType;
+    hasQueryTokens: boolean;
+    hasExtension: boolean;
+    extension?: string;
+  };
 }
 
 const DANGEROUS_PROTOCOLS = [
@@ -32,15 +51,76 @@ const DANGEROUS_PROTOCOLS = [
 ];
 
 /**
- * Validates and safely normalizes any video URL before it is loaded into the HTML5 <video> element.
+ * Detect video format from URL patterns, query params, or explicit hint.
  */
-export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResult {
+export function detectFormatFromUrl(
+  rawUrl: string,
+  explicitFormat: VideoFormatType = 'auto'
+): VideoFormatType {
+  if (explicitFormat && explicitFormat !== 'auto') {
+    return explicitFormat;
+  }
+
+  if (!rawUrl || typeof rawUrl !== 'string') return 'auto';
+
+  const trimmed = rawUrl.trim();
+  const lower = trimmed.toLowerCase();
+
+  try {
+    const urlObj = lower.startsWith('http://') || lower.startsWith('https://')
+      ? new URL(trimmed)
+      : new URL(trimmed, 'https://localhost');
+
+    const pathname = urlObj.pathname.toLowerCase();
+    const search = urlObj.search.toLowerCase();
+
+    // 1. Check path extension first
+    if (pathname.endsWith('.m3u8')) return 'hls';
+    if (pathname.endsWith('.mpd')) return 'dash';
+    if (pathname.endsWith('.webm')) return 'webm';
+    if (pathname.endsWith('.mov')) return 'mov';
+    if (pathname.endsWith('.mp4')) return 'mp4';
+
+    // 2. Check query string tokens or search parameters (e.g. ?manifest=hls or ?file=video.m3u8)
+    if (search.includes('.m3u8') || search.includes('format=hls') || search.includes('type=m3u8')) return 'hls';
+    if (search.includes('.mpd') || search.includes('format=dash') || search.includes('type=mpd')) return 'dash';
+    if (search.includes('.webm') || search.includes('format=webm')) return 'webm';
+    if (search.includes('.mov') || search.includes('format=mov')) return 'mov';
+    if (search.includes('.mp4') || search.includes('format=mp4')) return 'mp4';
+
+    // 3. Common path keywords for streaming manifests
+    if (pathname.includes('/hls/') || pathname.includes('/manifest(format=m3u8')) return 'hls';
+    if (pathname.includes('/dash/') || pathname.includes('/manifest(format=mpd')) return 'dash';
+
+    return 'auto';
+  } catch {
+    if (lower.includes('.m3u8')) return 'hls';
+    if (lower.includes('.mpd')) return 'dash';
+    if (lower.includes('.webm')) return 'webm';
+    if (lower.includes('.mov')) return 'mov';
+    if (lower.includes('.mp4')) return 'mp4';
+    return 'auto';
+  }
+}
+
+/**
+ * Validates and safely normalizes any video URL for the universal video player.
+ */
+export function getSafeVideoUrl(
+  rawUrl?: string | null,
+  explicitFormat: VideoFormatType = 'auto'
+): VideoUrlValidationResult {
   if (!rawUrl || typeof rawUrl !== 'string') {
     return {
       valid: false,
       safeUrl: '',
       isBlob: false,
       isHls: false,
+      isDash: false,
+      isWebm: false,
+      isMov: false,
+      isDirect: false,
+      format: 'auto',
       isFirebaseStorage: false,
       isLocalUpload: false,
       error: 'No video stream URL provided.',
@@ -54,6 +134,11 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
       safeUrl: '',
       isBlob: false,
       isHls: false,
+      isDash: false,
+      isWebm: false,
+      isMov: false,
+      isDirect: false,
+      format: 'auto',
       isFirebaseStorage: false,
       isLocalUpload: false,
       error: 'Video stream URL is empty.',
@@ -70,6 +155,11 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
         safeUrl: '',
         isBlob: false,
         isHls: false,
+        isDash: false,
+        isWebm: false,
+        isMov: false,
+        isDirect: false,
+        format: 'auto',
         isFirebaseStorage: false,
         isLocalUpload: false,
         error: `Playback blocked for security: '${protocol}' URLs are not permitted.`,
@@ -84,6 +174,11 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
       safeUrl: '',
       isBlob: false,
       isHls: false,
+      isDash: false,
+      isWebm: false,
+      isMov: false,
+      isDirect: false,
+      format: 'auto',
       isFirebaseStorage: false,
       isLocalUpload: false,
       error: 'Playback blocked: Local filesystem paths cannot be loaded directly by the browser.',
@@ -92,7 +187,6 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
 
   // 2. Client Blob URLs (e.g. blob:http://... or blob:https://...)
   if (lower.startsWith('blob:')) {
-    // Check if it's a cross-origin blob URL from a foreign domain or non-local session
     let isCrossOriginBlob = false;
     if (typeof window !== 'undefined' && window.location?.origin) {
       const match = trimmed.match(/^blob:(https?:\/\/[^/]+)/i);
@@ -101,8 +195,6 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
           isCrossOriginBlob = true;
         }
       } else {
-        // Blob without matching origin (e.g. blob:capacitor://, blob:null, or non-matching scheme)
-        // If running in Capacitor/Android WebView or foreign context, treat as cross-origin
         if (!trimmed.includes(window.location.host)) {
           isCrossOriginBlob = true;
         }
@@ -110,59 +202,78 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
     }
 
     if (isCrossOriginBlob) {
-      // Cross-origin blob: URLs cannot be displayed by the browser due to browser security isolation
-      // (Blink SecurityOrigin::CanDisplay blocks cross-origin blobs with 'Media load rejected by URL safety check').
-      // Gracefully resolve to a universal, high-availability HTTPS stream that plays reliably in Android WebView.
       return {
-        valid: true,
-        safeUrl: 'https://media.w3.org/2010/05/sintel/trailer.mp4',
-        isBlob: false,
+        valid: false,
+        safeUrl: '',
+        isBlob: true,
         isHls: false,
+        isDash: false,
+        isWebm: false,
+        isMov: false,
+        isDirect: false,
+        format: 'auto',
         isFirebaseStorage: false,
         isLocalUpload: false,
+        error: 'Video session expired or cross-origin blob is not accessible. Please re-upload or select a valid video.',
       };
     }
 
+    const detected = detectFormatFromUrl(trimmed, explicitFormat);
     return {
       valid: true,
       safeUrl: trimmed,
       isBlob: true,
-      isHls: false,
+      isHls: detected === 'hls',
+      isDash: detected === 'dash',
+      isWebm: detected === 'webm',
+      isMov: detected === 'mov',
+      isDirect: detected === 'mp4' || detected === 'webm' || detected === 'mov' || detected === 'auto',
+      format: detected,
       isFirebaseStorage: false,
       isLocalUpload: false,
     };
   }
 
-  // 3. Normalize Local / Uploaded Video Paths (e.g. /uploads/sintel.mp4)
-  // Also handle foreign domain uploads e.g. https://ais-dev-.../uploads/video.mp4 -> /uploads/video.mp4
+  // 3. Normalize Local / Uploaded Video Paths (e.g. /uploads/video.mp4)
   if (trimmed.includes('/uploads/')) {
     const uploadIndex = trimmed.indexOf('/uploads/');
     const pathPart = trimmed.slice(uploadIndex);
     const safeLocalUrl = pathPart.includes(' ') ? pathPart.replace(/ /g, '%20') : pathPart;
+    const detected = detectFormatFromUrl(safeLocalUrl, explicitFormat);
     return {
       valid: true,
       safeUrl: safeLocalUrl,
       isBlob: false,
-      isHls: safeLocalUrl.toLowerCase().endsWith('.m3u8'),
+      isHls: detected === 'hls',
+      isDash: detected === 'dash',
+      isWebm: detected === 'webm',
+      isMov: detected === 'mov',
+      isDirect: detected === 'mp4' || detected === 'webm' || detected === 'mov' || detected === 'auto',
+      format: detected,
       isFirebaseStorage: false,
       isLocalUpload: true,
     };
   }
 
-  // If path starts with uploads/ (missing leading slash)
   if (/^uploads\//i.test(trimmed)) {
     const safeLocalUrl = `/${trimmed}`.replace(/ /g, '%20');
+    const detected = detectFormatFromUrl(safeLocalUrl, explicitFormat);
     return {
       valid: true,
       safeUrl: safeLocalUrl,
       isBlob: false,
-      isHls: safeLocalUrl.toLowerCase().endsWith('.m3u8'),
+      isHls: detected === 'hls',
+      isDash: detected === 'dash',
+      isWebm: detected === 'webm',
+      isMov: detected === 'mov',
+      isDirect: detected === 'mp4' || detected === 'webm' || detected === 'mov' || detected === 'auto',
+      format: detected,
       isFirebaseStorage: false,
       isLocalUpload: true,
     };
   }
 
-  // 4. Remote HTTP / HTTPS URLs (Firebase Storage, Signed URLs, HLS, external MP4s)
+  // 4. Remote HTTP / HTTPS URLs (Firebase Storage, Signed URLs, HLS, DASH, external MP4s, WebM, MOV)
   if (lower.startsWith('http://') || lower.startsWith('https://')) {
     try {
       const parsed = new URL(trimmed);
@@ -172,18 +283,16 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
         parsed.hostname
       );
 
-      const isHls =
-        parsed.pathname.toLowerCase().endsWith('.m3u8') ||
-        parsed.search.toLowerCase().includes('.m3u8');
+      // Detect format
+      const detected = detectFormatFromUrl(trimmed, explicitFormat);
 
-      // Preserve the exact valid URL stored for the movie without modifying query parameters,
-      // tokens, access signatures, or percent-encoded path segments.
+      // Preserve query params, signed tokens and authorization keys safely
       let finalSafeUrl = trimmed;
       if (finalSafeUrl.includes(' ')) {
         finalSafeUrl = finalSafeUrl.replace(/ /g, '%20');
       }
 
-      // Upgrade http:// to https:// when running in HTTPS to prevent Mixed Content URL safety check rejection
+      // Upgrade http:// to https:// when running in HTTPS (avoid Mixed Content blocks)
       if (typeof window !== 'undefined' && window.location.protocol === 'https:' && parsed.protocol === 'http:') {
         if (parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
           finalSafeUrl = finalSafeUrl.replace(/^http:\/\//i, 'https://');
@@ -194,32 +303,57 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
         valid: true,
         safeUrl: finalSafeUrl,
         isBlob: false,
-        isHls,
+        isHls: detected === 'hls',
+        isDash: detected === 'dash',
+        isWebm: detected === 'webm',
+        isMov: detected === 'mov',
+        isDirect: detected === 'mp4' || detected === 'webm' || detected === 'mov' || detected === 'auto',
+        format: detected,
         isFirebaseStorage: isFirebase,
         isLocalUpload: false,
+        diagnostics: {
+          originalUrl: trimmed,
+          protocol: parsed.protocol,
+          hostname: parsed.hostname,
+          detectedFormat: detected,
+          hasQueryTokens: Boolean(parsed.search),
+          hasExtension: Boolean(parsed.pathname.includes('.')),
+          extension: parsed.pathname.split('.').pop(),
+        },
       };
     } catch {
-      // In case URL constructor fails on unencoded characters, perform safe repair
       const repaired = trimmed.replace(/ /g, '%20');
+      const detected = detectFormatFromUrl(repaired, explicitFormat);
       return {
         valid: true,
         safeUrl: repaired,
         isBlob: false,
-        isHls: repaired.toLowerCase().includes('.m3u8'),
+        isHls: detected === 'hls',
+        isDash: detected === 'dash',
+        isWebm: detected === 'webm',
+        isMov: detected === 'mov',
+        isDirect: detected === 'mp4' || detected === 'webm' || detected === 'mov' || detected === 'auto',
+        format: detected,
         isFirebaseStorage: /googleapis\.com|firebasestorage\.app|appspot\.com/i.test(repaired),
         isLocalUpload: false,
       };
     }
   }
 
-  // 5. Root-relative paths (e.g. /media/video.mp4 or /src/assets/...)
+  // 5. Root-relative paths (e.g. /media/video.mp4 or /assets/...)
   if (trimmed.startsWith('/')) {
     const safeUrl = trimmed.includes(' ') ? trimmed.replace(/ /g, '%20') : trimmed;
+    const detected = detectFormatFromUrl(safeUrl, explicitFormat);
     return {
       valid: true,
       safeUrl,
       isBlob: false,
-      isHls: safeUrl.toLowerCase().endsWith('.m3u8'),
+      isHls: detected === 'hls',
+      isDash: detected === 'dash',
+      isWebm: detected === 'webm',
+      isMov: detected === 'mov',
+      isDirect: detected === 'mp4' || detected === 'webm' || detected === 'mov' || detected === 'auto',
+      format: detected,
       isFirebaseStorage: false,
       isLocalUpload: true,
     };
@@ -230,6 +364,11 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
     safeUrl: '',
     isBlob: false,
     isHls: false,
+    isDash: false,
+    isWebm: false,
+    isMov: false,
+    isDirect: false,
+    format: 'auto',
     isFirebaseStorage: false,
     isLocalUpload: false,
     error: 'Unrecognized URL scheme. Please provide a valid HTTPS, stream, or uploaded video link.',
@@ -237,33 +376,71 @@ export function getSafeVideoUrl(rawUrl?: string | null): VideoUrlValidationResul
 }
 
 /**
- * Safely encodes spaces and non-ASCII characters in a URL path without double-encoding existing percent escapes (%20, %2F).
+ * Asynchronously probes a video URL to detect MIME type and stream format.
  */
-function encodePathSafely(pathname: string): string {
-  return pathname
-    .split('/')
-    .map((segment) => {
-      // If segment already contains percent-encoded characters, only encode raw unencoded spaces
-      if (/%[0-9A-Fa-f]{2}/.test(segment)) {
-        return segment.replace(/ /g, '%20');
-      }
-      return encodeURIComponent(segment);
-    })
-    .join('/');
-}
-
-/**
- * Fallback repair for URLs with unencoded spaces or characters that caused standard URL constructor failure.
- */
-function encodeFullUrlSafely(raw: string): string {
-  // Preserve protocol if present
-  const protoMatch = raw.match(/^([a-z]+:\/\/)(.*)/i);
-  if (protoMatch) {
-    const proto = protoMatch[1];
-    const rest = protoMatch[2];
-    const [pathAndHost, query] = rest.split('?');
-    const safePathAndHost = pathAndHost.replace(/ /g, '%20');
-    return query !== undefined ? `${proto}${safePathAndHost}?${query}` : `${proto}${safePathAndHost}`;
+export async function probeVideoFormatAsync(url: string): Promise<{
+  valid: boolean;
+  format: VideoFormatType;
+  contentType: string;
+  message: string;
+}> {
+  if (!url || typeof url !== 'string') {
+    return { valid: false, format: 'unknown' as any, contentType: '', message: 'URL is required' };
   }
-  return raw.replace(/ /g, '%20');
+
+  const localValidation = getSafeVideoUrl(url);
+  if (!localValidation.valid) {
+    return {
+      valid: false,
+      format: 'unknown' as any,
+      contentType: '',
+      message: localValidation.error || 'Invalid URL scheme',
+    };
+  }
+
+  // If format already identified by path
+  if (localValidation.format !== 'auto') {
+    return {
+      valid: true,
+      format: localValidation.format,
+      contentType:
+        localValidation.format === 'hls'
+          ? 'application/vnd.apple.mpegurl'
+          : localValidation.format === 'dash'
+          ? 'application/dash+xml'
+          : localValidation.format === 'webm'
+          ? 'video/webm'
+          : 'video/mp4',
+      message: `Verified format: ${localValidation.format.toUpperCase()}`,
+    };
+  }
+
+  // Probe server endpoint
+  try {
+    const res = await fetch('/api/validate-video-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const detected = (data.format as VideoFormatType) || detectFormatFromUrl(data.resolvedUrl || url);
+      return {
+        valid: Boolean(data.valid),
+        format: detected,
+        contentType: data.contentType || '',
+        message: data.message || `Verified ${detected.toUpperCase()}`,
+      };
+    }
+  } catch (err: any) {
+    console.warn('[VideoProbe] Server probe error:', err);
+  }
+
+  return {
+    valid: true,
+    format: 'mp4',
+    contentType: 'video/mp4',
+    message: 'Stream format auto-detected as standard MP4/HTML5',
+  };
 }

@@ -1,15 +1,16 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Hls from 'hls.js';
+import * as dashjs from 'dashjs';
 import {
   Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX, Maximize, Minimize,
   Settings, ArrowLeft, AlertCircle, RefreshCw, Languages, Subtitles,
-  Check, X, Sparkles, MessageSquare
+  Check, X, Sparkles, MessageSquare, Film, Info
 } from 'lucide-react';
 import { Movie, AudioTrack, SubtitleTrack } from '../types';
 import { api } from '../services/api';
 import { AdBanner } from './AdBanner';
 import { SubtitleCue, loadSubtitles } from '../utils/vttParser';
-import { getSafeVideoUrl } from '../utils/videoUrlHelper';
+import { getSafeVideoUrl, probeVideoFormatAsync } from '../utils/videoUrlHelper';
 
 interface VideoPlayerProps {
   movie: Movie;
@@ -28,6 +29,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dubbedAudioRef = useRef<HTMLAudioElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const dashRef = useRef<dashjs.MediaPlayerClass | null>(null);
+  const retryCountRef = useRef<number>(0);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const triedProxyRef = useRef<boolean>(false);
@@ -48,6 +51,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [hasResumed, setHasResumed] = useState<boolean>(false);
   const [activeVideoSrc, setActiveVideoSrc] = useState<string>('');
   const [isHlsMode, setIsHlsMode] = useState<boolean>(false);
+  const [isDashMode, setIsDashMode] = useState<boolean>(false);
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
+  const [diagnosticsInfo, setDiagnosticsInfo] = useState<any>(null);
+
+  // Helper to sanitize stream URL so secret auth tokens/keys are never displayed
+  const sanitizeUrl = (url: string): string => {
+    if (!url) return '';
+    try {
+      const parsed = new URL(url);
+      const searchParams = new URLSearchParams(parsed.search);
+      for (const key of Array.from(searchParams.keys())) {
+        if (/token|auth|key|secret|sig|signature|expires|credential/i.test(key)) {
+          searchParams.set(key, 'REDACTED');
+        }
+      }
+      parsed.search = searchParams.toString();
+      return parsed.toString();
+    } catch {
+      return url.replace(/([?&](?:token|auth|key|secret|sig|signature)=)[^&]*/gi, '$1REDACTED');
+    }
+  };
+
+  // Transcoding & Codec Processing States
+  const [movieStatus, setMovieStatus] = useState<'processing' | 'ready' | 'failed'>(movie.status || 'ready');
+  const [transcodeProgress, setTranscodeProgress] = useState<number>(movie.transcodeProgress || 0);
+  const [isTriggeringTranscode, setIsTriggeringTranscode] = useState<boolean>(false);
 
   // Multilingual System States
   const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<string>('original');
@@ -154,6 +183,59 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [selectedSubtitleTrackId, movie.id]);
 
+  // Poll transcode status when movie is processing
+  useEffect(() => {
+    let timer: NodeJS.Timeout | null = null;
+    if (movieStatus === 'processing') {
+      const poll = async () => {
+        try {
+          const res = await api.getTranscodeStatus(movie.id);
+          if (res.status) {
+            setMovieStatus(res.status);
+            if (typeof res.progress === 'number') {
+              setTranscodeProgress(res.progress);
+            }
+            if (res.status === 'ready' && res.videoUrl) {
+              setActiveVideoSrc(res.videoUrl);
+              setHasError(false);
+              initVideo();
+            }
+          }
+        } catch {}
+      };
+      timer = setInterval(poll, 3000);
+      poll();
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [movie.id, movieStatus]);
+
+  const handleTriggerReencode = async () => {
+    setIsTriggeringTranscode(true);
+    try {
+      const res = await api.reencodeMovie(movie.id);
+      if (res.success) {
+        setMovieStatus('processing');
+        setTranscodeProgress(1);
+        setHasError(false);
+      }
+    } catch (err: any) {
+      alert(`Re-encode failed: ${err.message}`);
+    } finally {
+      setIsTriggeringTranscode(false);
+    }
+  };
+
+  const handleRetry = () => {
+    if (retryCountRef.current >= 3) {
+      setErrorMessage('Maximum retry attempts reached (3/3). This video stream cannot be loaded or format is unsupported.');
+      return;
+    }
+    retryCountRef.current += 1;
+    initVideo();
+  };
+
   // 3. Audio Track Switching Handler (CRITICAL: Never restarts video; keeps currentTime unchanged)
   const handleSelectAudioTrack = (trackId: string) => {
     if (trackId === selectedAudioTrackId) return;
@@ -240,6 +322,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
+    if (dashRef.current) {
+      dashRef.current.destroy();
+      dashRef.current = null;
+    }
 
     // 1. Strict URL Safety & Scheme Validation
     const validation = getSafeVideoUrl(movie.videoUrl);
@@ -251,12 +337,65 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
 
     const safeSrc = validation.safeUrl;
-    const isHls = validation.isHls || movie.videoType === 'hls' || safeSrc.includes('.m3u8');
+    const isDash = validation.isDash || movie.videoType === 'dash' || safeSrc.includes('.mpd');
+    const isHls = !isDash && (validation.isHls || movie.videoType === 'hls' || safeSrc.includes('.m3u8'));
     setActiveVideoSrc(safeSrc);
     setIsHlsMode(isHls && !validation.isBlob);
+    setIsDashMode(isDash && !validation.isBlob);
 
-    // 2. Playback Routing (HLS vs Direct MP4 / Blob / Firebase Storage)
-    if (isHls && !validation.isBlob) {
+    // Record initial Technical Diagnostics for Admin
+    setDiagnosticsInfo({
+      originalUrl: sanitizeUrl(movie.videoUrl),
+      resolvedUrl: sanitizeUrl(safeSrc),
+      detectedFormat: isDash ? 'MPEG-DASH (.mpd)' : isHls ? 'HLS (.m3u8)' : (validation.format || 'MP4').toUpperCase(),
+      playerEngine: isDash
+        ? 'dash.js (MSE Player)'
+        : isHls
+        ? (Hls.isSupported() ? 'hls.js (MSE Stream)' : 'Native Apple HLS')
+        : 'HTML5 Video (Direct/Progressive)',
+      supportsMSE: typeof window !== 'undefined' && 'MediaSource' in window,
+      supportsHls: Hls.isSupported(),
+      supportsDash: typeof dashjs !== 'undefined' && dashjs.supportsMediaSource(),
+      isLocalUpload: validation.isLocalUpload,
+      isFirebaseStorage: validation.isFirebaseStorage,
+      timestamp: new Date().toLocaleTimeString(),
+    });
+
+    // 2. Playback Routing (DASH vs HLS vs Direct MP4/WebM/MOV)
+    if (isDash && !validation.isBlob) {
+      // MPEG-DASH Streaming via dash.js
+      if (dashjs.supportsMediaSource()) {
+        const player = dashjs.MediaPlayer().create();
+        dashRef.current = player;
+        player.initialize(video, safeSrc, true);
+
+        player.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, () => {
+          setIsLoading(false);
+          retryCountRef.current = 0;
+          if (initialTime > 5 && !hasResumed) {
+            video.currentTime = initialTime;
+            setHasResumed(true);
+          }
+          video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+        });
+
+        player.on(dashjs.MediaPlayer.events.ERROR, (e: any) => {
+          console.warn('[Universal Player] DASH playback error:', e);
+          setIsLoading(false);
+          setHasError(true);
+          setErrorMessage('MPEG-DASH stream playback failed. Please check manifest URL or server availability.');
+          setDiagnosticsInfo((prev: any) => ({
+            ...prev,
+            engineError: e?.error?.message || e?.type || 'DASH stream load error',
+          }));
+        });
+      } else {
+        // Native fallback or error if MSE not supported
+        video.src = safeSrc;
+        video.load();
+      }
+    } else if (isHls && !validation.isBlob) {
+      // HLS Streaming via hls.js or Native WebKit
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
@@ -269,6 +408,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           setIsLoading(false);
+          retryCountRef.current = 0;
           if (initialTime > 5 && !hasResumed) {
             video.currentTime = initialTime;
             setHasResumed(true);
@@ -280,8 +420,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           if (data.fatal) {
             switch (data.type) {
               case Hls.ErrorTypes.NETWORK_ERROR:
-                console.warn('HLS network error, attempting recovery...');
-                hls.startLoad();
+                if (retryCountRef.current < 3) {
+                  console.warn('HLS network error, attempting recovery...');
+                  hls.startLoad();
+                } else {
+                  hls.destroy();
+                  setHasError(true);
+                  setErrorMessage('HLS stream network error. Stream manifest is unreachable.');
+                  setIsLoading(false);
+                }
                 break;
               case Hls.ErrorTypes.MEDIA_ERROR:
                 console.warn('HLS media error, attempting recovery...');
@@ -305,9 +452,38 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         setIsLoading(false);
       }
     } else {
-      // Direct MP4, WebM, Blob, or Firebase Storage HTTPS video source
+      // Direct MP4, WebM, MOV, Blob, or Firebase Storage HTTPS video source
       video.src = safeSrc;
       video.load();
+
+      // Probe check for URLs without file extensions or auto format
+      if (
+        validation.format === 'auto' &&
+        !safeSrc.includes('.mp4') &&
+        !safeSrc.includes('.webm') &&
+        !safeSrc.includes('.mov') &&
+        !validation.isBlob &&
+        (safeSrc.startsWith('http://') || safeSrc.startsWith('https://'))
+      ) {
+        probeVideoFormatAsync(safeSrc).then((probe) => {
+          if (probe.valid) {
+            if (probe.format === 'hls' && Hls.isSupported() && !hlsRef.current) {
+              console.log('[Universal Player] Auto-switching to HLS based on probe headers');
+              video.pause();
+              const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+              hlsRef.current = hls;
+              hls.loadSource(safeSrc);
+              hls.attachMedia(video);
+            } else if (probe.format === 'dash' && dashjs.supportsMediaSource() && !dashRef.current) {
+              console.log('[Universal Player] Auto-switching to DASH based on probe headers');
+              video.pause();
+              const player = dashjs.MediaPlayer().create();
+              dashRef.current = player;
+              player.initialize(video, safeSrc, true);
+            }
+          }
+        }).catch(() => {});
+      }
     }
   }, [movie.videoUrl, movie.videoType, initialTime, hasResumed]);
 
@@ -317,6 +493,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
+      }
+      if (dashRef.current) {
+        dashRef.current.destroy();
+        dashRef.current = null;
       }
     };
   }, [initVideo]);
@@ -426,34 +606,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         return;
       }
 
-      // 2. If a local session blob failed (e.g. expired memory object or closed tab) or native playback failed, attempt fallback to licensed stream
-      if ((validation.isBlob || isNativeApp) && !triedProxyRef.current) {
-        triedProxyRef.current = true;
-        console.warn('[Z1 Movies VideoPlayer] Stream error, attempting fallback to licensed stream...');
-        video.src = 'https://media.w3.org/2010/05/sintel/trailer.mp4';
-        video.load();
-        video.play().then(() => setIsPlaying(true)).catch(() => {});
-        return;
-      }
-
       setHasError(true);
       let msg = 'Video could not be played. Please check the network connection.';
       if (mediaErr) {
-        if (mediaErr.code === 1) msg = 'Video playback was aborted by the browser.';
-        else if (mediaErr.code === 2) msg = 'A network error caused the video download to fail.';
-        else if (mediaErr.code === 3) msg = 'Video playback failed due to a decoding error.';
-        else if (mediaErr.code === 4) {
-          if (validation.isBlob) {
-            msg = 'Temporary local video session has expired. Please re-upload or select a video.';
-          } else if (validation.isFirebaseStorage) {
-            msg = 'Unable to play Firebase Storage video stream. Please verify access permissions or CORS.';
-          } else {
-            msg = 'The video format or codec is not supported by your current browser.';
+        if (mediaErr.code === 1) {
+          msg = 'Video playback was aborted by the browser.';
+        } else if (mediaErr.code === 2) {
+          msg = 'A network error caused the video download to fail.';
+        } else if (mediaErr.code === 3 || mediaErr.code === 4 || (mediaErr.message && /format|codec|supported/i.test(mediaErr.message))) {
+          // Format error / unsupported video or audio codec (e.g. H.265/HEVC or AC3/EAC3/DTS)
+          msg = 'Is video ka codec support nahi hai, processing/convert ho rahi hai';
+          // Automatically trigger or switch to processing mode if not already started
+          if (movieStatus !== 'processing') {
+            handleTriggerReencode();
           }
-        }
-
-        if (mediaErr.message && !mediaErr.message.includes('URL safety check')) {
-          msg += ` (${mediaErr.message})`;
+        } else if (mediaErr.message) {
+          msg = `Playback error: ${mediaErr.message}`;
         }
       }
       setErrorMessage(msg);
@@ -577,21 +745,36 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     );
 
     if (!isFs) {
-      if (container.requestFullscreen) {
-        container.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {
-          if (video && (video as any).webkitEnterFullscreen) {
-            (video as any).webkitEnterFullscreen();
+      const enterPromise = container.requestFullscreen
+        ? container.requestFullscreen()
+        : (container as any).webkitRequestFullscreen
+        ? (container as any).webkitRequestFullscreen()
+        : null;
+
+      if (enterPromise && enterPromise.then) {
+        enterPromise
+          .then(() => {
             setIsFullscreen(true);
-          }
-        });
-      } else if ((container as any).webkitRequestFullscreen) {
-        (container as any).webkitRequestFullscreen();
-        setIsFullscreen(true);
+            // Attempt to lock landscape orientation on mobile devices
+            if (typeof window !== 'undefined' && window.screen?.orientation && (window.screen.orientation as any).lock) {
+              (window.screen.orientation as any).lock('landscape').catch(() => {});
+            }
+          })
+          .catch(() => {
+            if (video && (video as any).webkitEnterFullscreen) {
+              (video as any).webkitEnterFullscreen();
+              setIsFullscreen(true);
+            }
+          });
       } else if (video && (video as any).webkitEnterFullscreen) {
         (video as any).webkitEnterFullscreen();
         setIsFullscreen(true);
       }
     } else {
+      // Release orientation lock if present
+      if (typeof window !== 'undefined' && window.screen?.orientation && (window.screen.orientation as any).unlock) {
+        (window.screen.orientation as any).unlock();
+      }
       if (doc.exitFullscreen) {
         doc.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
       } else if (doc.webkitExitFullscreen) {
@@ -881,23 +1064,141 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         )}
 
-        {/* Error Fallback with Retry */}
-        {hasError && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-40">
-            <AlertCircle className="w-14 h-14 text-red-500 mb-3" />
+        {/* Error Fallback with Retry, Diagnostics & Re-encode */}
+        {hasError && movieStatus !== 'processing' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-40 overflow-y-auto">
+            <AlertCircle className="w-14 h-14 text-red-500 mb-3 shrink-0" />
             <h3 className="text-lg font-bold text-white mb-1">Playback Error</h3>
-            <p className="text-slate-300 text-sm max-w-md mb-6">{errorMessage}</p>
-            <div className="flex items-center gap-3">
+            <p className="text-slate-300 text-sm max-w-md mb-2">{errorMessage}</p>
+
+            {retryCountRef.current > 0 && (
+              <span className="text-[11px] text-amber-400 font-mono mb-4">
+                Retry attempt: {retryCountRef.current} / 3
+              </span>
+            )}
+
+            <div className="flex flex-wrap items-center justify-center gap-3 mb-4">
               <button
-                onClick={initVideo}
-                className="flex items-center gap-2 px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg transition-colors"
+                onClick={handleTriggerReencode}
+                disabled={isTriggeringTranscode}
+                className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-red-600 to-amber-600 hover:from-red-500 hover:to-amber-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-red-950/60 transition-colors"
+              >
+                <RefreshCw className={`w-4 h-4 ${isTriggeringTranscode ? 'animate-spin' : ''}`} />
+                <span>Re-encode for compatibility</span>
+              </button>
+              <button
+                onClick={handleRetry}
+                disabled={retryCountRef.current >= 3}
+                className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 text-sm font-semibold rounded-lg transition-colors border border-slate-700"
               >
                 <RefreshCw className="w-4 h-4" />
-                Retry
+                <span>{retryCountRef.current >= 3 ? 'Max Retries Reached' : 'Retry Playback'}</span>
+              </button>
+              <button
+                onClick={() => setShowDiagnostics(!showDiagnostics)}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-sm font-semibold rounded-lg transition-colors border border-slate-700"
+                title="View stream technical diagnostics"
+              >
+                <Info className="w-4 h-4 text-sky-400" />
+                <span>{showDiagnostics ? 'Hide Diagnostics' : 'Diagnostics'}</span>
               </button>
               <button
                 onClick={onClose}
-                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold rounded-lg transition-colors"
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold rounded-lg transition-colors border border-slate-700"
+              >
+                Return to Overview
+              </button>
+            </div>
+
+            {/* Technical Diagnostics Accordion for Admin (Tokens Redacted) */}
+            {showDiagnostics && diagnosticsInfo && (
+              <div className="w-full max-w-lg bg-[#0d1017] border border-slate-800 rounded-xl p-4 text-left text-xs font-mono text-slate-300 space-y-1.5 shadow-2xl">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800 font-sans text-xs font-bold text-white">
+                  <span className="flex items-center gap-1.5 text-sky-400">
+                    <Info className="w-3.5 h-3.5" />
+                    Technical Diagnostics (Admin)
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-mono font-normal">Sensitive tokens redacted</span>
+                </div>
+                <div className="grid grid-cols-3 gap-1 pt-1">
+                  <span className="text-slate-500">Stream Format:</span>
+                  <span className="col-span-2 text-white font-semibold">{diagnosticsInfo.detectedFormat}</span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  <span className="text-slate-500">Player Engine:</span>
+                  <span className="col-span-2 text-emerald-400">{diagnosticsInfo.playerEngine}</span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  <span className="text-slate-500">Sanitized URL:</span>
+                  <span className="col-span-2 break-all text-slate-400">{diagnosticsInfo.resolvedUrl}</span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  <span className="text-slate-500">MSE Support:</span>
+                  <span className="col-span-2">{diagnosticsInfo.supportsMSE ? 'Yes (Native)' : 'No'}</span>
+                </div>
+                {diagnosticsInfo.errorCode && (
+                  <div className="grid grid-cols-3 gap-1">
+                    <span className="text-slate-500">Media Error:</span>
+                    <span className="col-span-2 text-red-400">Code {diagnosticsInfo.errorCode} {diagnosticsInfo.errorMessage ? `(${diagnosticsInfo.errorMessage})` : ''}</span>
+                  </div>
+                )}
+                {diagnosticsInfo.engineError && (
+                  <div className="grid grid-cols-3 gap-1">
+                    <span className="text-slate-500">Engine Error:</span>
+                    <span className="col-span-2 text-amber-400">{diagnosticsInfo.engineError}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Dedicated Processing Screen when movie is converting */}
+        {movieStatus === 'processing' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/95 p-6 text-center z-50">
+            <div className="relative mb-6">
+              <div className="w-20 h-20 rounded-full border-4 border-slate-700 border-t-red-600 animate-spin" />
+              <Film className="w-8 h-8 text-red-500 absolute inset-0 m-auto" />
+            </div>
+            <h3 className="text-xl sm:text-2xl font-bold text-white mb-2">
+              Processing & Converting Video...
+            </h3>
+            <p className="text-slate-300 text-sm max-w-lg mb-6 leading-relaxed">
+              Is video ka codec support nahi hai, processing/convert ho rahi hai. Mobile and browser compatibility ke liye video ko background me H.264 + AAC me auto-convert kiya ja raha hai.
+            </p>
+            <div className="w-full max-w-md bg-slate-800 rounded-full h-3 overflow-hidden mb-3 border border-slate-700">
+              <div
+                className="bg-gradient-to-r from-red-600 to-amber-500 h-full transition-all duration-300 rounded-full"
+                style={{ width: `${Math.max(5, transcodeProgress)}%` }}
+              />
+            </div>
+            <div className="text-sm font-mono text-slate-300 font-bold mb-6">
+              {transcodeProgress}% Completed
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await api.getTranscodeStatus(movie.id);
+                    if (res.status) {
+                      setMovieStatus(res.status);
+                      if (typeof res.progress === 'number') setTranscodeProgress(res.progress);
+                      if (res.status === 'ready' && res.videoUrl) {
+                        setActiveVideoSrc(res.videoUrl);
+                        setHasError(false);
+                        initVideo();
+                      }
+                    }
+                  } catch {}
+                }}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Check Status
+              </button>
+              <button
+                onClick={onClose}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-xs font-semibold rounded-lg transition-colors"
               >
                 Return to Overview
               </button>
@@ -1256,7 +1557,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 {showSettings && (
                   <div className="absolute right-0 bottom-full mb-2 bg-[#12151f] border border-slate-800 rounded-lg shadow-2xl p-2 w-36 space-y-1 z-50">
                     <div className="text-[10px] uppercase font-bold text-slate-400 px-2 py-1">Speed</div>
-                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                    {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => (
                       <button
                         key={speed}
                         onClick={() => handleSpeedChange(speed)}

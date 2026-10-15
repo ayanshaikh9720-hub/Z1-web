@@ -8,6 +8,7 @@ import {
 import { Movie, AdminStats, DownloadOption, User } from '../types';
 import { api } from '../services/api';
 import { EditMovieModal } from '../components/EditMovieModal';
+import { VideoPlayer } from '../components/VideoPlayer';
 import { normalizePosterUrl, optimizeImageFile, DEFAULT_POSTER_FALLBACK } from '../utils/imageUtils';
 import { getSafeVideoUrl } from '../utils/videoUrlHelper';
 
@@ -59,6 +60,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
   // Add New Movie modal state
   const [newMovieModalOpen, setNewMovieModalOpen] = useState<boolean>(false);
   const [currentNewMovie, setCurrentNewMovie] = useState<Partial<Movie> | null>(null);
+  const [newMovieSubtitleUrl, setNewMovieSubtitleUrl] = useState<string>('');
+  const [previewMovie, setPreviewMovie] = useState<Movie | null>(null);
   const [formSaving, setFormSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string>('');
 
@@ -92,7 +95,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
 
   // Video URL Probe State
   const [probeLoading, setProbeLoading] = useState<boolean>(false);
-  const [probeResult, setProbeResult] = useState<{ valid: boolean; message: string; contentType?: string } | null>(null);
+  const [probeResult, setProbeResult] = useState<{ valid: boolean; message: string; contentType?: string; format?: string } | null>(null);
 
   const loadAdminData = async () => {
     setLoading(true);
@@ -124,6 +127,64 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     document.addEventListener('click', handleOutsideClick);
     return () => document.removeEventListener('click', handleOutsideClick);
   }, []);
+
+  // Real-time polling for any movies undergoing transcoding
+  useEffect(() => {
+    const hasProcessing = movies.some((m) => m.status === 'processing');
+    if (!hasProcessing) return;
+
+    const interval = setInterval(async () => {
+      let anyChanged = false;
+      const updated = await Promise.all(
+        movies.map(async (m) => {
+          if (m.status === 'processing') {
+            try {
+              const res = await api.getTranscodeStatus(m.id);
+              if (res.status && (res.status !== m.status || res.progress !== m.transcodeProgress)) {
+                anyChanged = true;
+                return {
+                  ...m,
+                  status: res.status,
+                  transcodeProgress: res.progress,
+                  videoUrl: res.videoUrl || m.videoUrl,
+                  transcodeError: res.error,
+                };
+              }
+            } catch {}
+          }
+          return m;
+        })
+      );
+
+      if (anyChanged) {
+        setMovies(updated);
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [movies]);
+
+  const handleReencodeMovie = async (movie: Movie) => {
+    try {
+      setMovies((prev) =>
+        prev.map((m) =>
+          m.id === movie.id ? { ...m, status: 'processing', transcodeProgress: 1, transcodeError: undefined } : m
+        )
+      );
+      triggerNotification(`Started compatibility re-encoding for "${movie.title}"...`);
+      const res = await api.reencodeMovie(movie.id);
+      if (res.success) {
+        triggerNotification(`Re-encoding "${movie.title}" to mobile-friendly H.264+AAC in the background.`);
+      }
+    } catch (err: any) {
+      triggerNotification(`Re-encode failed: ${err.message}`, 'error');
+      setMovies((prev) =>
+        prev.map((m) =>
+          m.id === movie.id ? { ...m, status: 'failed', transcodeError: err.message } : m
+        )
+      );
+    }
+  };
 
   const handleTogglePublish = async (movie: Movie) => {
     try {
@@ -209,7 +270,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
       posterUrl: '', // REQUIRED: Must be uploaded or selected
       backdropUrl: '',
       videoUrl: '',
-      videoType: 'mp4',
+      videoType: 'auto',
       trailerUrl: '',
       downloadUrls: [
         {
@@ -231,6 +292,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
       trending: false,
       published: true,
     });
+    setNewMovieSubtitleUrl('');
     setFormError('');
     setProbeResult(null);
     setUploadSuccess('');
@@ -348,12 +410,18 @@ export const AdminPage: React.FC<AdminPageProps> = ({
 
     try {
       const res = await api.uploadFile(file, (pct) => setUploadProgress(pct));
-      setUploadSuccess(`Upload complete: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB)`);
+      let successMsg = `Upload complete: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB)`;
+      if (res.needsTranscode) {
+        successMsg += ` · Non-standard codec detected (${res.videoCodec || ''}/${res.audioCodec || ''}). Auto-converting to H.264+AAC in background...`;
+      }
+      setUploadSuccess(successMsg);
       if (currentNewMovie) {
         setCurrentNewMovie({
           ...currentNewMovie,
           videoUrl: res.url,
           videoType: res.url.endsWith('.m3u8') ? 'hls' : 'mp4',
+          status: res.status || (res.needsTranscode ? 'processing' : 'ready'),
+          transcodeProgress: res.transcodeProgress ?? (res.needsTranscode ? 0 : 100),
         });
       }
       verifyVideoUrl(res.url);
@@ -381,6 +449,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         message: res.message,
         contentType: res.contentType,
       });
+      if (res.valid && res.format && currentNewMovie && (!currentNewMovie.videoType || currentNewMovie.videoType === 'auto')) {
+        setCurrentNewMovie((prev) => prev ? { ...prev, videoType: res.format as any } : prev);
+      }
     } catch (err: any) {
       setProbeResult({
         valid: false,
@@ -424,10 +495,25 @@ export const AdminPage: React.FC<AdminPageProps> = ({
     setFormError('');
 
     try {
+      const subtitleTracks = newMovieSubtitleUrl.trim()
+        ? [
+            {
+              id: `sub_${Date.now()}`,
+              language: currentNewMovie.language || 'English',
+              label: `${currentNewMovie.language || 'English'} Subtitles`,
+              src: newMovieSubtitleUrl.trim(),
+              format: 'vtt' as const,
+              isDefault: true,
+            },
+          ]
+        : currentNewMovie.subtitleTracks || [];
+
       const moviePayload: Partial<Movie> = {
         ...currentNewMovie,
         videoUrl: videoValidation.safeUrl,
+        videoType: currentNewMovie.videoType || 'auto',
         backdropUrl: currentNewMovie.backdropUrl || currentNewMovie.posterUrl,
+        subtitleTracks,
       };
 
       const res = await api.createMovie(moviePayload);
@@ -805,27 +891,45 @@ export const AdminPage: React.FC<AdminPageProps> = ({
 
               {/* Status & Stats row */}
               <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-800/80">
-                <button
-                  type="button"
-                  onClick={() => handleTogglePublish(movie)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-h-[36px] ${
-                    movie.published
-                      ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60'
-                      : 'bg-amber-950/60 text-amber-400 border border-amber-800/60'
-                  }`}
-                >
-                  {movie.published ? (
-                    <>
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Published</span>
-                    </>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleTogglePublish(movie)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-h-[36px] ${
+                      movie.published
+                        ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60'
+                        : 'bg-amber-950/60 text-amber-400 border border-amber-800/60'
+                    }`}
+                  >
+                    {movie.published ? (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Published</span>
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="w-3.5 h-3.5" />
+                        <span>Draft</span>
+                      </>
+                    )}
+                  </button>
+
+                  {movie.status === 'processing' ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold bg-amber-950/80 text-amber-300 border border-amber-800/60 animate-pulse">
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                      <span>Transcoding {movie.transcodeProgress || 0}%</span>
+                    </span>
+                  ) : movie.status === 'failed' ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold bg-red-950/80 text-red-300 border border-red-800/60" title={movie.transcodeError || 'Format conversion failed'}>
+                      <AlertTriangle className="w-3 h-3" />
+                      <span>Convert Failed</span>
+                    </span>
                   ) : (
-                    <>
-                      <XCircle className="w-3.5 h-3.5" />
-                      <span>Draft</span>
-                    </>
+                    <span className="inline-flex items-center text-[10px] text-slate-400 font-mono">
+                      H.264
+                    </span>
                   )}
-                </button>
+                </div>
 
                 <div className="flex items-center gap-3 text-xs text-slate-400">
                   <span className="font-mono">{movie.views?.toLocaleString() || 0} views</span>
@@ -833,24 +937,41 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 </div>
               </div>
 
+              {movie.status === 'processing' && (
+                <div className="w-full bg-slate-900/90 p-2 rounded-xl border border-amber-800/40 space-y-1">
+                  <div className="flex justify-between text-[10px] text-amber-300">
+                    <span>Re-encoding to universal H.264+AAC...</span>
+                    <span className="font-mono font-bold">{movie.transcodeProgress || 0}%</span>
+                  </div>
+                  <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                    <div
+                      className="bg-amber-500 h-full transition-all duration-300"
+                      style={{ width: `${movie.transcodeProgress || 5}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
               {/* Primary Mobile Action Buttons (Easy-to-tap on Android) */}
-              <div className="grid grid-cols-3 gap-2 pt-1">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => handleOpenEditModal(movie, 'general')}
                   className="min-h-[44px] py-2 px-3 bg-slate-800 hover:bg-slate-700 active:bg-slate-750 text-white rounded-xl text-xs font-bold border border-slate-700 flex items-center justify-center gap-1.5 transition-colors shadow-sm"
                 >
                   <Edit2 className="w-4 h-4 text-red-400" />
-                  <span>Edit Movie</span>
+                  <span>Edit</span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => handleStartDelete(movie)}
-                  className="min-h-[44px] py-2 px-3 bg-red-950/60 hover:bg-red-900/60 active:bg-red-900 text-red-300 rounded-xl text-xs font-bold border border-red-800/60 flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                  onClick={() => handleReencodeMovie(movie)}
+                  disabled={movie.status === 'processing'}
+                  className="min-h-[44px] py-2 px-3 bg-sky-950/60 hover:bg-sky-900/60 active:bg-sky-900 disabled:opacity-50 text-sky-300 rounded-xl text-xs font-bold border border-sky-800/60 flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                  title="Re-encode for compatibility"
                 >
-                  <Trash2 className="w-4 h-4 text-red-400" />
-                  <span>Delete</span>
+                  <RefreshCw className={`w-4 h-4 text-sky-400 ${movie.status === 'processing' ? 'animate-spin' : ''}`} />
+                  <span>{movie.status === 'processing' ? 'Converting' : 'Re-encode'}</span>
                 </button>
 
                 <button
@@ -860,6 +981,15 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 >
                   <Play className="w-4 h-4 fill-current text-slate-300" />
                   <span>Test Play</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleStartDelete(movie)}
+                  className="min-h-[44px] py-2 px-3 bg-red-950/60 hover:bg-red-900/60 active:bg-red-900 text-red-300 rounded-xl text-xs font-bold border border-red-800/60 flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                >
+                  <Trash2 className="w-4 h-4 text-red-400" />
+                  <span>Delete</span>
                 </button>
               </div>
             </div>
@@ -937,6 +1067,28 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                           </>
                         )}
                       </button>
+
+                      {movie.status === 'processing' ? (
+                        <div className="flex flex-col gap-1 mt-1.5">
+                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-950/80 text-amber-300 border border-amber-800/60 animate-pulse">
+                            <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                            <span>Converting ({movie.transcodeProgress || 0}%)</span>
+                          </span>
+                          <div className="w-24 bg-slate-800 rounded-full h-1 overflow-hidden">
+                            <div
+                              className="bg-amber-500 h-full transition-all duration-300"
+                              style={{ width: `${movie.transcodeProgress || 5}%` }}
+                            />
+                          </div>
+                        </div>
+                      ) : movie.status === 'failed' ? (
+                        <div className="mt-1">
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-950/80 text-red-400 border border-red-800/60" title={movie.transcodeError || 'Format conversion failed'}>
+                            <AlertTriangle className="w-2.5 h-2.5" />
+                            <span>Convert Failed</span>
+                          </span>
+                        </div>
+                      ) : null}
                     </td>
 
                     <td className="py-3 px-3">
@@ -985,6 +1137,18 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                         >
                           <Edit2 className="w-3.5 h-3.5 text-red-400" />
                           <span>Edit</span>
+                        </button>
+
+                        {/* Direct Re-encode Button */}
+                        <button
+                          type="button"
+                          onClick={() => handleReencodeMovie(movie)}
+                          disabled={movie.status === 'processing'}
+                          className="px-2.5 py-1.5 rounded-lg bg-sky-950/50 hover:bg-sky-900/60 active:bg-sky-850 disabled:opacity-50 text-sky-300 hover:text-white flex items-center gap-1.5 text-xs font-semibold border border-sky-800/60 transition-colors"
+                          title="Re-encode for compatibility (H.264 + AAC)"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 text-sky-400 ${movie.status === 'processing' ? 'animate-spin' : ''}`} />
+                          <span>{movie.status === 'processing' ? 'Converting' : 'Re-encode'}</span>
                         </button>
 
                         {/* Visible Direct Delete Movie Button */}
@@ -1057,6 +1221,19 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                                 >
                                   <Upload className="w-3.5 h-3.5 text-sky-400" />
                                   <span>Replace Video</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveMenuMovieId(null);
+                                    handleReencodeMovie(movie);
+                                  }}
+                                  disabled={movie.status === 'processing'}
+                                  className="w-full text-left px-3 py-2 text-xs text-sky-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors font-medium"
+                                >
+                                  <RefreshCw className={`w-3.5 h-3.5 text-sky-400 ${movie.status === 'processing' ? 'animate-spin' : ''}`} />
+                                  <span>Re-encode for compatibility</span>
                                 </button>
                               </div>
 
@@ -1587,6 +1764,27 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                       <span>{uploadError}</span>
                     </div>
                   )}
+
+                  {currentNewMovie.status === 'processing' && (
+                    <div className="mt-3 p-3 bg-amber-950/40 border border-amber-800/60 rounded-xl text-xs space-y-2">
+                      <div className="flex items-center justify-between text-amber-300 font-semibold">
+                        <span className="flex items-center gap-1.5">
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          Auto-transcoding to H.264 + AAC in background...
+                        </span>
+                        <span className="font-mono">{currentNewMovie.transcodeProgress || 0}%</span>
+                      </div>
+                      <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                        <div
+                          className="bg-amber-500 h-full transition-all duration-300"
+                          style={{ width: `${currentNewMovie.transcodeProgress || 5}%` }}
+                        />
+                      </div>
+                      <p className="text-[11px] text-slate-400">
+                        Uploaded video contains non-standard codecs. It is being converted to universal mobile-compatible MP4 format automatically.
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Video URL Input & Type */}
@@ -1606,15 +1804,40 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1">Stream Format</label>
                     <select
-                      value={currentNewMovie.videoType || 'mp4'}
+                      value={currentNewMovie.videoType || 'auto'}
                       onChange={(e) => setCurrentNewMovie({ ...currentNewMovie, videoType: e.target.value as any })}
                       className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs"
                     >
-                      <option value="mp4">MP4 (Standard)</option>
-                      <option value="hls">HLS (.m3u8 Adaptive)</option>
-                      <option value="webm">WebM</option>
+                      <option value="auto">Auto Detect (Default)</option>
+                      <option value="mp4">Direct MP4 Video</option>
+                      <option value="hls">HLS Stream (.m3u8)</option>
+                      <option value="dash">MPEG-DASH (.mpd)</option>
+                      <option value="webm">WebM Video</option>
+                      <option value="mov">MOV / QuickTime</option>
                     </select>
                   </div>
+                </div>
+
+                {/* Optional Subtitle Track URL */}
+                <div className="pt-2 border-t border-slate-800/80">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold text-slate-300">
+                      Subtitle URL (Optional)
+                    </label>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      WebVTT (.vtt) or SRT (.srt)
+                    </span>
+                  </div>
+                  <input
+                    type="text"
+                    value={newMovieSubtitleUrl}
+                    onChange={(e) => setNewMovieSubtitleUrl(e.target.value)}
+                    placeholder="https://.../subtitles.vtt or /uploads/subtitles.vtt"
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono placeholder-slate-600"
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Direct subtitle file link. Auto-loaded into the Universal Video Player subtitles menu.
+                  </p>
                 </div>
 
                 {/* Trailer URL Field */}
@@ -1629,21 +1852,70 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   />
                 </div>
 
-                {/* Probe & Verification Action */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => verifyVideoUrl()}
-                    disabled={probeLoading || !currentNewMovie.videoUrl}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700"
-                  >
-                    {probeLoading ? (
-                      <div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5 text-red-400" />
-                    )}
-                    <span>Verify Video Stream with Probe</span>
-                  </button>
+                {/* Probe & Verification Action & Live Preview */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-slate-800">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => verifyVideoUrl()}
+                      disabled={probeLoading || !currentNewMovie.videoUrl}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors"
+                    >
+                      {probeLoading ? (
+                        <div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5 text-red-400" />
+                      )}
+                      <span>Verify Stream with Probe</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!currentNewMovie.videoUrl) return;
+                        const testMovie: Movie = {
+                          id: 'preview_add_modal',
+                          title: currentNewMovie.title || 'Stream Preview',
+                          description: currentNewMovie.description || '',
+                          posterUrl: currentNewMovie.posterUrl || DEFAULT_POSTER_FALLBACK,
+                          backdropUrl: currentNewMovie.backdropUrl || currentNewMovie.posterUrl || DEFAULT_POSTER_FALLBACK,
+                          videoUrl: currentNewMovie.videoUrl,
+                          videoType: currentNewMovie.videoType || 'auto',
+                          downloadUrls: currentNewMovie.downloadUrls || [],
+                          releaseYear: currentNewMovie.releaseYear || 2025,
+                          language: currentNewMovie.language || 'English',
+                          genres: currentNewMovie.genres || ['Action'],
+                          duration: currentNewMovie.duration || 90,
+                          cast: currentNewMovie.cast || [],
+                          director: currentNewMovie.director || '',
+                          published: true,
+                          views: 0,
+                          downloads: 0,
+                          createdAt: new Date().toISOString(),
+                          updatedAt: new Date().toISOString(),
+                          subtitleTracks: newMovieSubtitleUrl.trim()
+                            ? [
+                                {
+                                  id: 'preview_sub',
+                                  language: currentNewMovie.language || 'English',
+                                  label: `${currentNewMovie.language || 'English'} Subtitles`,
+                                  src: newMovieSubtitleUrl.trim(),
+                                  format: 'vtt',
+                                  isDefault: true,
+                                },
+                              ]
+                            : [],
+                        };
+                        setPreviewMovie(testMovie);
+                      }}
+                      disabled={!currentNewMovie.videoUrl}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg transition-colors shadow-md shadow-red-950/40"
+                      title="Preview stream in Universal Video Player before saving"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>Preview Video</span>
+                    </button>
+                  </div>
 
                   {probeResult && (
                     <div className={`text-xs flex items-center gap-1.5 ${probeResult.valid ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -1806,6 +2078,36 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Universal Video Player Live Stream Preview */}
+      {previewMovie && (
+        <div className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-md flex flex-col">
+          <div className="p-3 bg-slate-900 border-b border-slate-800 flex items-center justify-between text-xs text-slate-200">
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-white">Stream Preview:</span>
+              <span className="font-semibold text-slate-300">{previewMovie.title}</span>
+              <span className="font-mono text-red-400 truncate max-w-sm hidden sm:inline">
+                {previewMovie.videoUrl}
+              </span>
+              <span className="text-[10px] uppercase bg-slate-800 px-2 py-0.5 rounded text-slate-300 font-semibold border border-slate-700">
+                Format: {(previewMovie.videoType || 'auto').toUpperCase()}
+              </span>
+            </div>
+            <button
+              onClick={() => setPreviewMovie(null)}
+              className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold transition-colors"
+            >
+              Close Preview
+            </button>
+          </div>
+          <div className="flex-1 relative">
+            <VideoPlayer
+              movie={previewMovie}
+              onClose={() => setPreviewMovie(null)}
+            />
           </div>
         </div>
       )}

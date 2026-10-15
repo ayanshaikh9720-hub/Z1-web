@@ -23,6 +23,8 @@ export interface SubtitleTrack {
   isDefault?: boolean;
 }
 
+export type VideoFormatType = 'auto' | 'mp4' | 'hls' | 'dash' | 'webm' | 'mov';
+
 export interface Movie {
   id: string;
   title: string;
@@ -30,7 +32,7 @@ export interface Movie {
   posterUrl: string;
   backdropUrl: string;
   videoUrl: string;
-  videoType: 'mp4' | 'hls' | 'webm';
+  videoType: VideoFormatType;
   downloadUrls: DownloadOption[];
   trailerUrl?: string;
   audioTracks?: AudioTrack[];
@@ -45,6 +47,9 @@ export interface Movie {
   featured?: boolean;
   trending?: boolean;
   published: boolean;
+  status?: 'processing' | 'ready' | 'failed';
+  transcodeProgress?: number; // 0 to 100
+  transcodeError?: string;
   views: number;
   downloads: number;
   createdAt: string;
