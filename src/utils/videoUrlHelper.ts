@@ -423,7 +423,8 @@ export async function probeVideoFormatAsync(url: string): Promise<{
       body: JSON.stringify({ url }),
     });
 
-    if (res.ok) {
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (res.ok && contentType.includes('application/json')) {
       const data = await res.json();
       const detected = (data.format as VideoFormatType) || detectFormatFromUrl(data.resolvedUrl || url);
       return {

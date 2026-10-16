@@ -1231,6 +1231,12 @@ async function downloadRemoteVideoToTemp(url: string, targetPath: string): Promi
         if (res.statusCode && res.statusCode >= 400) {
           return reject(new Error(`Failed to download remote video: HTTP ${res.statusCode}`));
         }
+        const contentType = (res.headers['content-type'] || '').toLowerCase();
+        if (contentType.includes('text/html')) {
+          return reject(
+            new Error(`Remote server returned an HTML webpage (${contentType}) instead of a video stream`)
+          );
+        }
         res.pipe(fileStream);
         fileStream.on('finish', () => {
           fileStream.close();
@@ -1339,15 +1345,63 @@ apiRouter.post('/upload', handleVideoMulter, async (req: Request, res: Response)
 apiRouter.post('/movies/:id/transcode', async (req: Request, res: Response) => {
   if (IS_VERCEL) {
     return res.status(400).json({
-      error: 'Transcoding is not supported on Vercel serverless. Please upload H.264+AAC encoded video.',
+      success: false,
+      error: 'Server-side video transcoding is not supported on Vercel serverless. Please upload H.264+AAC encoded video or host video on an external streaming provider.',
       isVercel: true,
     });
   }
 
   const db = loadDB();
-  const movie = db.movies.find((m) => m.id === req.params.id);
+  let movie = db.movies.find((m) => m.id === req.params.id);
+
+  // If movie not found in local db, check if client provided movie metadata / videoUrl (e.g. from Firestore or state)
+  if (!movie && req.body && (req.body.videoUrl || req.body.movie?.videoUrl)) {
+    const bodyMovie = req.body.movie || {};
+    movie = {
+      id: req.params.id,
+      title: req.body.title || bodyMovie.title || 'Video Stream',
+      videoUrl: req.body.videoUrl || bodyMovie.videoUrl,
+      videoType: req.body.videoType || bodyMovie.videoType || 'mp4',
+      status: 'processing',
+      transcodeProgress: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      ...bodyMovie,
+    };
+    db.movies.push(movie);
+    saveDB(db);
+  }
+
   if (!movie) {
-    return res.status(404).json({ error: 'Movie not found' });
+    return res.status(404).json({
+      success: false,
+      error: `Movie with ID "${req.params.id}" not found on server. Please provide videoUrl in request body.`,
+      status: 'failed',
+    });
+  }
+
+  if (!movie.videoUrl) {
+    return res.status(400).json({
+      success: false,
+      error: 'Movie has no valid video stream URL to transcode.',
+      status: 'failed',
+    });
+  }
+
+  if (movie.videoUrl.startsWith('blob:')) {
+    return res.status(400).json({
+      success: false,
+      error: 'Cannot transcode browser-memory blob URL. Please wait for the video upload to complete before transcoding.',
+      status: 'failed',
+    });
+  }
+
+  if (movie.videoUrl.includes('.m3u8')) {
+    return res.status(400).json({
+      success: false,
+      error: 'This video is an HLS (.m3u8) adaptive stream. It is already formatted for streaming and cannot be converted via MP4 transcoding.',
+      status: 'ready',
+    });
   }
 
   // Check if already running
@@ -1412,30 +1466,61 @@ apiRouter.post('/movies/:id/transcode', async (req: Request, res: Response) => {
   })();
 });
 
+// Support GET on /movies/:id/transcode so redirects or misconfigured methods return clean JSON
+apiRouter.get('/movies/:id/transcode', (req: Request, res: Response) => {
+  const db = loadDB();
+  const movie = db.movies.find((m) => m.id === req.params.id);
+  const job = transcodeJobs.get(req.params.id);
+
+  if (!movie && !job) {
+    return res.status(404).json({
+      success: false,
+      error: `Movie with ID "${req.params.id}" not found. To initiate transcoding, send a POST request.`,
+      status: 'ready',
+    });
+  }
+
+  const status = job?.status || movie?.status || 'ready';
+  const progress = job?.progress !== undefined ? job.progress : movie?.transcodeProgress || 100;
+  return res.json({
+    success: true,
+    status,
+    progress,
+    message: `Current transcode status: ${status}`,
+    videoUrl: movie?.videoUrl,
+  });
+});
+
 // 18c. Get transcode status for movie
 apiRouter.get('/movies/:id/transcode-status', (req: Request, res: Response) => {
   const db = loadDB();
   const movie = db.movies.find((m) => m.id === req.params.id);
-  if (!movie) {
-    return res.status(404).json({ error: 'Movie not found' });
+  const job = transcodeJobs.get(req.params.id);
+
+  if (!movie && !job) {
+    return res.status(404).json({
+      success: false,
+      error: `Movie with ID "${req.params.id}" not found`,
+      status: 'ready',
+      progress: 100,
+    });
   }
 
-  const job = transcodeJobs.get(movie.id);
-  const status = job?.status || movie.status || 'ready';
+  const status = job?.status || movie?.status || 'ready';
   const progress =
     job?.progress !== undefined
       ? job.progress
-      : movie.transcodeProgress !== undefined
+      : movie?.transcodeProgress !== undefined
       ? movie.transcodeProgress
       : 100;
-  const error = job?.error || movie.transcodeError;
+  const error = job?.error || movie?.transcodeError;
 
   res.json({
     success: true,
     status,
     progress,
     error,
-    videoUrl: movie.videoUrl,
+    videoUrl: movie?.videoUrl,
   });
 });
 
@@ -1915,6 +2000,15 @@ app.use('/assets', express.static(path.resolve(process.cwd(), 'src/assets')));
 // Mount router on BOTH '/api' and '/'
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
+
+// Terminal 404 handler for all /api/* routes to prevent unhandled API requests from falling through to HTML SPA
+app.all('/api/*', (req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    error: `API route not found: ${req.method} ${req.originalUrl || req.url}`,
+    status: 404,
+  });
+});
 
 // Global Error Handling Middleware - Guarantees clean JSON responses instead of default HTML 500
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

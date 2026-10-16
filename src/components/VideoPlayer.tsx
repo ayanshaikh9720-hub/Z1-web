@@ -211,17 +211,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [movie.id, movieStatus]);
 
+  const [reencodeNotice, setReencodeNotice] = useState<string>('');
+
   const handleTriggerReencode = async () => {
     setIsTriggeringTranscode(true);
+    setReencodeNotice('');
     try {
-      const res = await api.reencodeMovie(movie.id);
+      const res = await api.reencodeMovie(movie.id, {
+        title: movie.title,
+        videoUrl: movie.videoUrl,
+        videoType: movie.videoType,
+      });
       if (res.success) {
         setMovieStatus('processing');
         setTranscodeProgress(1);
         setHasError(false);
+        setReencodeNotice('');
+      } else {
+        setReencodeNotice(res.message || 'Could not start re-encoding');
       }
     } catch (err: any) {
-      alert(`Re-encode failed: ${err.message}`);
+      console.warn('[VideoPlayer] Re-encode failed:', err.message);
+      setReencodeNotice(`Re-encode unavailable: ${err.message}`);
     } finally {
       setIsTriggeringTranscode(false);
     }
@@ -615,10 +626,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           msg = 'A network error caused the video download to fail.';
         } else if (mediaErr.code === 3 || mediaErr.code === 4 || (mediaErr.message && /format|codec|supported/i.test(mediaErr.message))) {
           // Format error / unsupported video or audio codec (e.g. H.265/HEVC or AC3/EAC3/DTS)
-          msg = 'Is video ka codec support nahi hai, processing/convert ho rahi hai';
-          // Automatically trigger or switch to processing mode if not already started
-          if (movieStatus !== 'processing') {
-            handleTriggerReencode();
+          if (validation.isHls || movie.videoUrl.includes('.m3u8')) {
+            msg = 'HLS adaptive stream could not be loaded. Please check your network connection or verify stream availability.';
+          } else {
+            msg = 'This video format or audio codec is not natively supported by your browser (e.g. H.265/HEVC, MKV, or unsupported audio). You can re-encode it for compatibility below.';
           }
         } else if (mediaErr.message) {
           msg = `Playback error: ${mediaErr.message}`;
@@ -1070,6 +1081,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <AlertCircle className="w-14 h-14 text-red-500 mb-3 shrink-0" />
             <h3 className="text-lg font-bold text-white mb-1">Playback Error</h3>
             <p className="text-slate-300 text-sm max-w-md mb-2">{errorMessage}</p>
+
+            {reencodeNotice && (
+              <div className="p-3 mb-3 max-w-md bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-300 text-xs text-left font-mono">
+                {reencodeNotice}
+              </div>
+            )}
 
             {retryCountRef.current > 0 && (
               <span className="text-[11px] text-amber-400 font-mono mb-4">

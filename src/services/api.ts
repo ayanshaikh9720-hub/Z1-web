@@ -72,6 +72,83 @@ async function mapFirebaseUser(fbUser: FirebaseUser): Promise<User> {
   return userObj;
 }
 
+/**
+ * Resolves the backend API base URL depending on runtime environment
+ * (Web browser vs Capacitor Android native vs external hosting).
+ */
+export function getApiBaseUrl(): string {
+  const envUrl =
+    (import.meta as any).env?.VITE_API_URL ||
+    (import.meta as any).env?.VITE_APP_URL ||
+    '';
+  const isNative =
+    typeof window !== 'undefined' &&
+    (Boolean((window as any).Capacitor?.isNativePlatform?.()) ||
+      window.location.protocol === 'capacitor:' ||
+      (window.location.hostname === 'localhost' && window.location.port === ''));
+
+  if (isNative && envUrl) {
+    return envUrl.replace(/\/$/, '');
+  }
+  return '';
+}
+
+/**
+ * Safely parses fetch responses to guarantee that HTML error pages, SPA fallbacks,
+ * or proxy responses are NEVER passed blindly to response.json().
+ * Produces clear, actionable error messages with real HTTP status codes.
+ */
+export async function safeParseResponse<T = any>(
+  res: Response,
+  actionName = 'Request'
+): Promise<T> {
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const isJson = contentType.includes('application/json');
+
+  if (!res.ok) {
+    let errorMessage = `${actionName} failed with HTTP ${res.status} (${res.statusText || 'Error'})`;
+    if (isJson) {
+      try {
+        const json = await res.json();
+        errorMessage = json.error || json.message || errorMessage;
+      } catch {
+        // Fallback
+      }
+    } else {
+      try {
+        const text = await res.text();
+        if (text.includes('<!doctype') || text.includes('<html')) {
+          errorMessage = `${actionName} failed (HTTP ${res.status}): Server returned an HTML web page instead of JSON. The backend API service may be unavailable or misconfigured on this domain.`;
+        } else if (text.trim().length > 0 && text.length < 200) {
+          errorMessage = `${actionName} failed (HTTP ${res.status}): ${text.trim()}`;
+        }
+      } catch {}
+    }
+    throw new Error(errorMessage);
+  }
+
+  // HTTP status is 2xx, but verify it is actually JSON and not an HTML SPA fallback
+  if (!isJson) {
+    const text = await res.text();
+    if (text.includes('<!doctype') || text.includes('<html')) {
+      throw new Error(
+        `${actionName} failed: Server returned an HTML web page instead of JSON (HTTP ${res.status}). Verify that the API backend is running and that the endpoint URL is correct.`
+      );
+    }
+    throw new Error(
+      `${actionName} failed: Expected JSON response but received "${contentType || 'unknown'}" (HTTP ${res.status}).`
+    );
+  }
+
+  try {
+    return (await res.json()) as T;
+  } catch (parseErr: any) {
+    throw new Error(
+      `${actionName} failed: Server returned malformed JSON (HTTP ${res.status}): ${parseErr.message}`
+    );
+  }
+}
+
 export const api = {
   // ---------------- INITIAL DATA ---------------- //
   ensureInitialData: () => {
@@ -713,18 +790,15 @@ export const api = {
     translatedText?: string;
     vttContent?: string;
   }> => {
-    const res = await fetch('/api/ai/translate-subtitles', {
+    const baseUrl = getApiBaseUrl();
+    const res = await fetch(`${baseUrl}/api/ai/translate-subtitles`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(params),
     });
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || `Translation failed (HTTP ${res.status})`);
-    }
-    return res.json();
+    return await safeParseResponse(res, 'Subtitle translation');
   },
 
   generateDubbing: async (params: {
@@ -739,22 +813,22 @@ export const api = {
     label: string;
     voice?: string;
   }> => {
-    const res = await fetch('/api/ai/generate-dubbing', {
+    const baseUrl = getApiBaseUrl();
+    const res = await fetch(`${baseUrl}/api/ai/generate-dubbing`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(params),
     });
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || `Dubbing generation failed (HTTP ${res.status})`);
-    }
-    return res.json();
+    return await safeParseResponse(res, 'AI Dubbing generation');
   },
 
   // ---------------- TRANSCODING & CODEC COMPATIBILITY ---------------- //
-  reencodeMovie: async (movieId: string): Promise<{
+  reencodeMovie: async (
+    movieId: string,
+    movieData?: { title?: string; videoUrl?: string; videoType?: string }
+  ): Promise<{
     success: boolean;
     message: string;
     status: 'processing' | 'ready' | 'failed';
@@ -762,18 +836,38 @@ export const api = {
     movie?: Movie;
   }> => {
     const token = authStorage.getToken();
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
-    const res = await fetch(`/api/movies/${movieId}/transcode`, {
-      method: 'POST',
-      headers,
-    });
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || `Re-encoding failed (HTTP ${res.status})`);
+    const baseUrl = getApiBaseUrl();
+    const targetUrl = `${baseUrl}/api/movies/${movieId}/transcode`;
+
+    let res: Response;
+    try {
+      res = await fetch(targetUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          title: movieData?.title,
+          videoUrl: movieData?.videoUrl,
+          videoType: movieData?.videoType,
+        }),
+      });
+    } catch (networkErr: any) {
+      throw new Error(
+        `Network error: Unable to reach media transcoding server at "${targetUrl}". (${networkErr.message})`
+      );
     }
-    return res.json();
+
+    return await safeParseResponse<{
+      success: boolean;
+      message: string;
+      status: 'processing' | 'ready' | 'failed';
+      progress: number;
+      movie?: Movie;
+    }>(res, 'Video re-encoding');
   },
 
   getTranscodeStatus: async (movieId: string): Promise<{
@@ -783,10 +877,18 @@ export const api = {
     error?: string;
     videoUrl?: string;
   }> => {
-    const res = await fetch(`/api/movies/${movieId}/transcode-status`);
-    if (!res.ok) {
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetch(`${baseUrl}/api/movies/${movieId}/transcode-status`);
+      return await safeParseResponse<{
+        success: boolean;
+        status: 'processing' | 'ready' | 'failed';
+        progress: number;
+        error?: string;
+        videoUrl?: string;
+      }>(res, 'Check transcode status');
+    } catch {
       return { success: false, status: 'ready', progress: 100 };
     }
-    return res.json();
   },
 };

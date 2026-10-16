@@ -327,6 +327,36 @@
       "downloads": 0,
       "createdAt": "2026-09-28T01:29:31.198Z",
       "updatedAt": "2026-09-29T01:29:31.198Z"
+    },
+    {
+      "id": "test_movie",
+      "title": "Test Movie",
+      "videoUrl": "/uploads/compat_Test_Movie_1792112005484.mp4",
+      "videoType": "mp4",
+      "status": "ready",
+      "transcodeProgress": 100,
+      "createdAt": "2026-10-16T00:53:25.482Z",
+      "updatedAt": "2026-10-16T00:53:36.579Z"
+    },
+    {
+      "id": "hls_test",
+      "title": "HLS Stream",
+      "videoUrl": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+      "videoType": "mp4",
+      "status": "processing",
+      "transcodeProgress": 1,
+      "createdAt": "2026-10-16T00:53:47.138Z",
+      "updatedAt": "2026-10-16T00:53:47.138Z"
+    },
+    {
+      "id": "blob_test",
+      "title": "Blob Test",
+      "videoUrl": "blob:http://localhost:3000/1234-5678",
+      "videoType": "mp4",
+      "status": "processing",
+      "transcodeProgress": 1,
+      "createdAt": "2026-10-16T00:53:50.173Z",
+      "updatedAt": "2026-10-16T00:53:50.173Z"
     }
   ],
   "watchlists": [],

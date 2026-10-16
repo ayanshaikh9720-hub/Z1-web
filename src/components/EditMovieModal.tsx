@@ -1559,8 +1559,10 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
                     try {
                       setIsReencoding(true);
                       setVideoUploadError('');
-                      setVideoUploadSuccess(`Starting compatibility re-encode for "${movie.title}"...`);
-                      const res = await api.reencodeMovie(movie.id);
+                      const res = await api.reencodeMovie(movie.id, {
+                        title: title || movie.title,
+                        videoUrl: videoUrl || movie.videoUrl,
+                      });
                       if (res.success) {
                         setVideoUploadSuccess(`Re-encoding "${movie.title}" to H.264 + AAC in the background.`);
                       }

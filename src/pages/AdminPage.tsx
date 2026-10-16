@@ -172,7 +172,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         )
       );
       triggerNotification(`Started compatibility re-encoding for "${movie.title}"...`);
-      const res = await api.reencodeMovie(movie.id);
+      const res = await api.reencodeMovie(movie.id, {
+        title: movie.title,
+        videoUrl: movie.videoUrl,
+      });
       if (res.success) {
         triggerNotification(`Re-encoding "${movie.title}" to mobile-friendly H.264+AAC in the background.`);
       }
