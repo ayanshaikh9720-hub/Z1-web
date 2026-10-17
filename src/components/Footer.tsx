@@ -12,12 +12,20 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-10">
           {/* Brand & Mission */}
           <div className="md:col-span-2 space-y-3">
-            <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-md bg-red-600 flex items-center justify-center">
-                <Film className="w-4 h-4 text-white" />
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg overflow-hidden border border-red-500/30 bg-black flex items-center justify-center shadow-md">
+                <img
+                  src="/images/z1_movies_logo.png"
+                  alt="Z1 Movies"
+                  className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = '/src/assets/images/z1_movies_logo_1792202555117.jpg';
+                  }}
+                />
               </div>
               <span className="font-display font-extrabold text-lg text-white">
-                Z1<span className="text-red-500">.</span>MOVIES
+                Z1<span className="text-red-500 font-bold ml-0.5">MOVIES</span>
               </span>
             </div>
             <p className="text-slate-400 text-xs leading-relaxed max-w-md">

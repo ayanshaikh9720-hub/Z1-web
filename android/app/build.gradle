@@ -1,20 +1,55 @@
 apply plugin: 'com.android.application'
 
-// Dynamic version management with environment and property overrides
-def envVersionCode = System.getenv("APP_VERSION_CODE")
-def envVersionName = System.getenv("APP_VERSION_NAME")
-def propVersionCode = project.findProperty("versionCode")
-def propVersionName = project.findProperty("versionName")
+// Helper functions with safe fallbacks ensuring values are never null or invalid
+def getExtInteger(String propName, int defaultValue) {
+    if (rootProject.ext.has(propName)) {
+        def val = rootProject.ext.get(propName)
+        if (val != null) {
+            try {
+                return Integer.parseInt(val.toString().trim())
+            } catch (Exception ignored) {}
+        }
+    }
+    return defaultValue
+}
+
+def getComputedVersionCode() {
+    def envCode = System.getenv("APP_VERSION_CODE")
+    if (envCode != null && !envCode.trim().isEmpty()) {
+        try {
+            return Integer.parseInt(envCode.trim())
+        } catch (Exception ignored) {}
+    }
+    def propCode = project.findProperty("versionCode")
+    if (propCode != null && !propCode.toString().trim().isEmpty()) {
+        try {
+            return Integer.parseInt(propCode.toString().trim())
+        } catch (Exception ignored) {}
+    }
+    return 1
+}
+
+def getComputedVersionName() {
+    def envName = System.getenv("APP_VERSION_NAME")
+    if (envName != null && !envName.trim().isEmpty()) {
+        return envName.trim()
+    }
+    def propName = project.findProperty("versionName")
+    if (propName != null && !propName.toString().trim().isEmpty()) {
+        return propName.toString().trim()
+    }
+    return "1.0.0"
+}
 
 android {
     namespace = "com.z1movies.app"
-    compileSdk = rootProject.ext.compileSdkVersion
+    compileSdk = getExtInteger('compileSdkVersion', 35)
     defaultConfig {
         applicationId "com.z1movies.app"
-        minSdkVersion rootProject.ext.minSdkVersion
-        targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode (envVersionCode ?: propVersionCode ?: "1") as Integer
-        versionName (envVersionName ?: propVersionName ?: "1.0.0")
+        minSdkVersion getExtInteger('minSdkVersion', 24)
+        targetSdkVersion getExtInteger('targetSdkVersion', 35)
+        versionCode getComputedVersionCode()
+        versionName getComputedVersionName()
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -43,7 +78,7 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             def releaseSigning = signingConfigs.findByName("release")
-            if (releaseSigning?.storeFile?.exists()) {
+            if (releaseSigning != null && releaseSigning.storeFile != null && releaseSigning.storeFile.exists()) {
                 signingConfig releaseSigning
             }
         }

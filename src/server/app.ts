@@ -214,6 +214,7 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
   format: 'hls' | 'dash' | 'mp4' | 'webm' | 'mov' | 'unknown';
   resolvedUrl: string;
   message: string;
+  supportsByteRange: boolean;
 }> {
   return new Promise((resolve) => {
     try {
@@ -235,6 +236,8 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
           const statusCode = probeRes.statusCode || 0;
           const contentType = probeRes.headers['content-type'] || '';
           const contentLength = probeRes.headers['content-length'];
+          const acceptRanges = (probeRes.headers['accept-ranges'] || '').toLowerCase();
+          const supportsByteRange = statusCode === 206 || acceptRanges.includes('bytes') || Boolean(probeRes.headers['content-range']);
 
           if (
             (statusCode === 301 || statusCode === 302 || statusCode === 307 || statusCode === 308) &&
@@ -260,6 +263,7 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
               format: detectedFormat,
               resolvedUrl: targetUrl,
               message: `Video stream verified (${detectedFormat.toUpperCase()}) and playable by browser`,
+              supportsByteRange,
             });
           } else {
             resolve({
@@ -269,6 +273,7 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
               format: detectedFormat,
               resolvedUrl: targetUrl,
               message: `Remote server returned HTTP ${statusCode}`,
+              supportsByteRange: false,
             });
           }
         }
@@ -282,6 +287,7 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
           format: 'unknown',
           resolvedUrl: targetUrl,
           message: `Network probe failed: ${err.message}`,
+          supportsByteRange: false,
         });
       });
 
@@ -294,6 +300,7 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
           format: 'unknown',
           resolvedUrl: targetUrl,
           message: 'Video URL verification timed out (8s)',
+          supportsByteRange: false,
         });
       });
 
@@ -306,6 +313,7 @@ function probeUrl(targetUrl: string, maxRedirects = 5): Promise<{
         format: 'unknown',
         resolvedUrl: targetUrl,
         message: `Invalid URL: ${err.message}`,
+        supportsByteRange: false,
       });
     }
   });
@@ -547,7 +555,8 @@ apiRouter.post('/validate-video-url', async (req: Request, res: Response) => {
         format,
         size: stat.size,
         resolvedUrl: url,
-        message: `Local video stream (${format.toUpperCase()}) verified on server storage`,
+        supportsByteRange: true,
+        message: `Local video stream (${format.toUpperCase()}) verified on server storage with full HTTP 206 Partial Content support`,
       });
       return;
     } else {

@@ -31,19 +31,31 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="sticky top-0 z-40 w-full bg-[#08090d]/95 backdrop-blur-md border-b border-slate-800/80 transition-all">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-        {/* Zone 1: Single text element Brand wordmark */}
+        {/* Zone 1: Professional Z1 Movies Brand Logo */}
         <div className="flex items-center gap-3">
           <button
             onClick={() => onNavigate('home')}
-            className="flex items-center gap-2 group focus:outline-none"
+            className="flex items-center gap-2.5 group focus:outline-none"
             aria-label="Z1 Movies Home"
           >
-            <div className="w-9 h-9 rounded-lg bg-gradient-to-tr from-red-700 to-red-600 flex items-center justify-center shadow-lg shadow-red-950/50 group-hover:scale-105 transition-transform">
-              <Film className="w-5 h-5 text-white" />
+            <div className="relative w-10 h-10 rounded-xl overflow-hidden border border-red-500/30 shadow-lg shadow-red-950/40 group-hover:border-red-500/60 group-hover:scale-105 transition-all bg-black/80 flex items-center justify-center">
+              <img
+                src="/images/z1_movies_logo.png"
+                alt="Z1 Movies Logo"
+                className="w-full h-full object-cover"
+                referrerPolicy="no-referrer"
+                onError={(e) => {
+                  // Fallback to generated asset if needed
+                  (e.target as HTMLImageElement).src = '/src/assets/images/z1_movies_logo_1792202555117.jpg';
+                }}
+              />
             </div>
-            <span className="font-display font-extrabold text-xl tracking-tight text-white group-hover:text-red-400 transition-colors">
-              Z1<span className="text-red-500">.</span>MOVIES
-            </span>
+            <div className="flex flex-col text-left">
+              <span className="font-display font-extrabold text-xl tracking-tight text-white group-hover:text-red-400 transition-colors leading-none flex items-center">
+                Z1<span className="text-red-500 font-bold ml-0.5">MOVIES</span>
+              </span>
+              <span className="text-[9px] uppercase tracking-widest text-slate-400 font-medium">Cinematic OTT</span>
+            </div>
           </button>
         </div>
 

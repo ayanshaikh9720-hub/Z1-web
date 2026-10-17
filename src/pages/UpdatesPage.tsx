@@ -31,17 +31,25 @@ export const UpdatesPage: React.FC<UpdatesPageProps> = ({ onBack }) => {
       </button>
 
       {/* Hero Banner */}
-      <div className="relative overflow-hidden bg-gradient-to-r from-red-950/40 via-slate-900 to-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 mb-8 shadow-2xl">
-        <div className="relative z-10 max-w-2xl">
-          <div className="inline-flex items-center gap-2 px-3 py-1 bg-red-600/20 border border-red-500/30 rounded-full text-red-400 text-xs font-bold uppercase tracking-wider mb-3">
+      <div className="relative overflow-hidden bg-gradient-to-r from-red-950/40 via-slate-900 to-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 mb-8 shadow-2xl flex flex-col sm:flex-row items-center gap-6">
+        <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl overflow-hidden border-2 border-red-500/40 shadow-xl shadow-red-950/60 bg-black shrink-0">
+          <img
+            src="/images/z1_movies_logo.png"
+            alt="Z1 Movies Android"
+            className="w-full h-full object-cover"
+            referrerPolicy="no-referrer"
+          />
+        </div>
+        <div className="relative z-10 max-w-2xl text-left">
+          <div className="inline-flex items-center gap-2 px-3 py-1 bg-red-600/20 border border-red-500/30 rounded-full text-red-400 text-xs font-bold uppercase tracking-wider mb-2">
             <Smartphone className="w-3.5 h-3.5" />
-            <span>Official Android APK Release</span>
+            <span>Official Android APK Release (com.z1movies.app)</span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-white font-display tracking-tight mb-2">
             Z1 Movies Android Application
           </h1>
           <p className="text-slate-300 text-sm leading-relaxed mb-6">
-            Get the latest cinematic experience with optimized H.264 & HLS streaming, fast downloads, subtitle customization, and dual-audio support. Supports seamless in-place updates.
+            Get the latest cinematic experience with optimized H.264 & HLS streaming, fast downloads, subtitle customization, and dual-audio support. Supports seamless in-place updates without uninstalling.
           </p>
 
           <div className="flex flex-wrap items-center gap-3">
