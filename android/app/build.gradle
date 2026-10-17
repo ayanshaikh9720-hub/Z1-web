@@ -60,15 +60,19 @@ android {
 
     signingConfigs {
         release {
-            def keystoreFilePath = System.getenv("ANDROID_KEYSTORE_FILE") ?: project.findProperty("RELEASE_STORE_FILE")
-            if (keystoreFilePath) {
-                def keystoreFile = file(keystoreFilePath)
-                if (keystoreFile.exists()) {
-                    storeFile keystoreFile
-                    storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("RELEASE_STORE_PASSWORD")
-                    keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: project.findProperty("RELEASE_KEY_ALIAS")
-                    keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD")
-                }
+            def pathStr = System.getenv("ANDROID_KEYSTORE_FILE") ?: project.findProperty("RELEASE_STORE_FILE") ?: "release.keystore"
+            def keystoreFile = file(pathStr)
+            if (!keystoreFile.exists()) {
+                keystoreFile = file("app/${pathStr}")
+            }
+            if (!keystoreFile.exists()) {
+                keystoreFile = file("../${pathStr}")
+            }
+            if (keystoreFile.exists()) {
+                storeFile keystoreFile
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("RELEASE_STORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: project.findProperty("RELEASE_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD")
             }
         }
     }
@@ -81,6 +85,9 @@ android {
             if (releaseSigning != null && releaseSigning.storeFile != null && releaseSigning.storeFile.exists()) {
                 signingConfig releaseSigning
             }
+        }
+        debug {
+            signingConfig signingConfigs.debug
         }
     }
 }

@@ -74,19 +74,55 @@ jobs:
           fi
           npx cap sync android
 
-      - name: Decode Release Keystore
+      - name: Validate and Decode Release Keystore
+        if: ${{ inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push' }}
         id: keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
-            echo "has_keystore=true" >> $GITHUB_OUTPUT
-            echo "Release keystore decoded successfully."
-          else
-            echo "has_keystore=false" >> $GITHUB_OUTPUT
-            echo "::warning::ANDROID_KEYSTORE_BASE64 secret not found. Release signing will be skipped unless secret is configured."
+          set +x
+          MISSING=""
+          if [ -z "$KEYSTORE_BASE64" ]; then MISSING="$MISSING ANDROID_KEYSTORE_BASE64"; fi
+          if [ -z "$KEYSTORE_PASSWORD" ]; then MISSING="$MISSING ANDROID_KEYSTORE_PASSWORD"; fi
+          if [ -z "$KEY_ALIAS" ]; then MISSING="$MISSING ANDROID_KEY_ALIAS"; fi
+          if [ -z "$KEY_PASSWORD" ]; then MISSING="$MISSING ANDROID_KEY_PASSWORD"; fi
+
+          if [ -n "$MISSING" ]; then
+            echo "::error::Release build halted! The following required GitHub Secrets are missing or empty:$MISSING"
+            echo ""
+            echo "=========================================================================================="
+            echo "CRITICAL: A Release APK requires production signing credentials to support in-place updates."
+            echo "Please configure the 4 signing secrets in GitHub:"
+            echo "  Repository -> Settings -> Secrets and variables -> Actions -> New repository secret"
+            echo "    1. ANDROID_KEYSTORE_BASE64  (Base64 encoded .keystore / .jks file)"
+            echo "    2. ANDROID_KEYSTORE_PASSWORD (Keystore storepass password)"
+            echo "    3. ANDROID_KEY_ALIAS         (Key alias name)"
+            echo "    4. ANDROID_KEY_PASSWORD      (Key password)"
+            echo "=========================================================================================="
+            exit 1
           fi
+
+          # Decode Base64 keystore into android/app/release.keystore
+          mkdir -p android/app
+          echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+          
+          if [ ! -s android/app/release.keystore ]; then
+            echo "::error::Decoded keystore file is empty or corrupted! Please verify ANDROID_KEYSTORE_BASE64 secret format."
+            exit 1
+          fi
+
+          # Validate keystore integrity and alias using Java keytool without logging secrets
+          echo "Validating keystore integrity and key alias..."
+          if ! keytool -list -keystore android/app/release.keystore -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::Keystore verification failed! Either ANDROID_KEYSTORE_PASSWORD is incorrect or ANDROID_KEY_ALIAS ('$KEY_ALIAS') was not found in the keystore."
+            exit 1
+          fi
+
+          echo "Keystore and alias '$KEY_ALIAS' verified successfully."
+          echo "has_keystore=true" >> $GITHUB_OUTPUT
 
       - name: Build Release APK
         if: ${{ inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push' }}
@@ -100,15 +136,20 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          if [ "${{ steps.keystore.outputs.has_keystore }}" = "true" ]; then
-            echo "Building signed Release APK (versionCode: $APP_VERSION_CODE, versionName: $APP_VERSION_NAME)..."
-            ./gradlew assembleRelease
-          else
-            echo "Signing keystore not detected. Building debug APK as testing fallback..."
-            ./gradlew assembleDebug
+          echo "Building signed Release APK (versionCode: $APP_VERSION_CODE, versionName: $APP_VERSION_NAME)..."
+          ./gradlew assembleRelease
+
+          # Verify output APK exists
+          RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$RELEASE_APK" ]; then
+            echo "::error::Signed Release APK was not found at android/$RELEASE_APK!"
+            exit 1
           fi
 
-      - name: Build Debug APK (if requested)
+          APK_SIZE=$(ls -lh "$RELEASE_APK" | awk '{print $5}')
+          echo "Signed Release APK successfully generated: android/$RELEASE_APK ($APK_SIZE)"
+
+      - name: Build Debug APK (Explicitly Requested)
         if: ${{ inputs.build_type == 'debug' || inputs.build_type == 'both' }}
         env:
           APP_VERSION_CODE: ${{ steps.versioning.outputs.version_code }}
@@ -116,7 +157,14 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
+          echo "Building Debug APK (versionCode: $APP_VERSION_CODE, versionName: $APP_VERSION_NAME)..."
           ./gradlew assembleDebug
+
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$DEBUG_APK" ]; then
+            echo "::error::Debug APK was not found at android/$DEBUG_APK!"
+            exit 1
+          fi
 
       - name: Clean Keystore from Workspace
         if: always()
@@ -124,17 +172,17 @@ jobs:
           rm -f android/app/release.keystore
 
       - name: Upload Signed Release APK
-        if: ${{ steps.keystore.outputs.has_keystore == 'true' && (inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push') }}
+        if: ${{ inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push' }}
         uses: actions/upload-artifact@v4
         with:
           name: Z1-Movies-Release-APK-${{ steps.versioning.outputs.version_name }}
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
-      - name: Upload Debug APK
-        if: ${{ steps.keystore.outputs.has_keystore != 'true' || inputs.build_type == 'debug' || inputs.build_type == 'both' }}
+      - name: Upload Debug APK (Explicitly Requested)
+        if: ${{ inputs.build_type == 'debug' || inputs.build_type == 'both' }}
         uses: actions/upload-artifact@v4
         with:
           name: Z1-Movies-Debug-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: ignore
+          if-no-files-found: error
