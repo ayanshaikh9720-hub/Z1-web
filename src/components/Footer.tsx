@@ -63,6 +63,11 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
                   My Watchlist
                 </button>
               </li>
+              <li>
+                <button onClick={() => onNavigate('updates')} className="hover:text-red-400 text-red-500 font-semibold transition-colors flex items-center gap-1">
+                  <span>Download Android APK</span>
+                </button>
+              </li>
             </ul>
           </div>
 

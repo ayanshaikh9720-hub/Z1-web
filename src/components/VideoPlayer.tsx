@@ -7,7 +7,7 @@ import {
   Check, X, Sparkles, MessageSquare, Film, Info
 } from 'lucide-react';
 import { Movie, AudioTrack, SubtitleTrack } from '../types';
-import { api } from '../services/api';
+import { api, getApiBaseUrl } from '../services/api';
 import { AdBanner } from './AdBanner';
 import { SubtitleCue, loadSubtitles } from '../utils/vttParser';
 import { getSafeVideoUrl, probeVideoFormatAsync } from '../utils/videoUrlHelper';
@@ -600,8 +600,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         (window.location.hostname === 'localhost' && window.location.port === '')
       );
 
+      const baseUrl = getApiBaseUrl();
       const canAttemptProxy =
-        !isNativeApp &&
+        (!isNativeApp || Boolean(baseUrl)) &&
         !validation.isLocalUpload &&
         !validation.isBlob &&
         (validation.safeUrl.startsWith('http://') || validation.safeUrl.startsWith('https://')) &&
@@ -611,7 +612,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       if (canAttemptProxy) {
         triedProxyRef.current = true;
         console.warn('[Z1 Movies VideoPlayer] Direct playback failed. Attempting playback via stream proxy...');
-        video.src = `/api/stream-proxy?url=${encodeURIComponent(validation.safeUrl)}`;
+        video.src = `${baseUrl}/api/stream-proxy?url=${encodeURIComponent(validation.safeUrl)}`;
         video.load();
         video.play().then(() => setIsPlaying(true)).catch(() => {});
         return;
@@ -620,10 +621,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setHasError(true);
       let msg = 'Video could not be played. Please check the network connection.';
       if (mediaErr) {
+        setDiagnosticsInfo((prev: any) => ({
+          ...prev,
+          errorCode: mediaErr.code,
+          errorMessage: mediaErr.message || (mediaErr.code === 4 ? 'MEDIA_ERR_SRC_NOT_SUPPORTED' : `Media Error ${mediaErr.code}`),
+        }));
+
         if (mediaErr.code === 1) {
           msg = 'Video playback was aborted by the browser.';
         } else if (mediaErr.code === 2) {
-          msg = 'A network error caused the video download to fail.';
+          msg = 'A network error caused the video download to fail. Please check your internet connection.';
         } else if (mediaErr.code === 3 || mediaErr.code === 4 || (mediaErr.message && /format|codec|supported/i.test(mediaErr.message))) {
           // Format error / unsupported video or audio codec (e.g. H.265/HEVC or AC3/EAC3/DTS)
           if (validation.isHls || movie.videoUrl.includes('.m3u8')) {

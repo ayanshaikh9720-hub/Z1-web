@@ -703,6 +703,22 @@ apiRouter.post('/admin/reset-demo', adminMiddleware, (_req: Request, res: Respon
   res.json({ success: true, message: 'Database reset to licensed sample library' });
 });
 
+// 13b. App Update & Release Delivery Endpoint
+apiRouter.get('/app/version', (_req: Request, res: Response) => {
+  res.json({
+    applicationId: 'com.z1movies.app',
+    appName: 'Z1 Movies',
+    currentVersion: '1.0.0',
+    minSupportedVersion: '1.0.0',
+    releaseChannel: 'stable',
+    updateAvailable: false,
+    downloadUrl: 'https://github.com/ayanqureshi2732-gif/Z1-movie-/releases/latest',
+    apkDirectUrl: 'https://github.com/ayanqureshi2732-gif/Z1-movie-/releases',
+    releaseNotes: 'Seamless in-place APK updates enabled with persistent signing certificate. Preserves all watchlists, downloads, and user sessions.',
+    dataPreservationGuaranteed: true,
+  });
+});
+
 // 14. User: Watchlist
 apiRouter.get('/user/watchlist', authMiddleware, (req: Request, res: Response) => {
   const userId = ((req as any).user as TokenPayload).userId;

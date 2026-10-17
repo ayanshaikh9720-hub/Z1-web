@@ -25,6 +25,7 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'genres', label: 'Genres' },
     { id: 'search', label: 'Search' },
     { id: 'watchlist', label: 'Watchlist' },
+    { id: 'updates', label: 'Android APK' },
   ];
 
   return (

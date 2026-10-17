@@ -185,6 +185,35 @@ export function getSafeVideoUrl(
     };
   }
 
+  // 1b. Check for known unsupported desktop container formats (.mkv, .avi, .wmv, .flv, .rmvb)
+  const isUnsupportedContainer = /\.(mkv|avi|wmv|flv|rmvb)(\?.*)?$/i.test(trimmed);
+  if (isUnsupportedContainer) {
+    const extMatch = trimmed.match(/\.(mkv|avi|wmv|flv|rmvb)/i);
+    const ext = extMatch ? extMatch[1].toUpperCase() : 'MKV';
+    return {
+      valid: false,
+      safeUrl: trimmed,
+      isBlob: false,
+      isHls: false,
+      isDash: false,
+      isWebm: false,
+      isMov: false,
+      isDirect: false,
+      format: 'auto',
+      isFirebaseStorage: false,
+      isLocalUpload: trimmed.includes('/uploads/'),
+      error: `The ${ext} container format is not natively playable in web browsers. Please use "Re-encode for compatibility" to convert it to mobile-friendly MP4 (H.264 + AAC).`,
+      diagnostics: {
+        originalUrl: trimmed,
+        protocol: trimmed.split(':')[0] || 'http',
+        detectedFormat: 'auto',
+        hasQueryTokens: trimmed.includes('?'),
+        hasExtension: true,
+        extension: ext.toLowerCase(),
+      },
+    };
+  }
+
   // 2. Client Blob URLs (e.g. blob:http://... or blob:https://...)
   if (lower.startsWith('blob:')) {
     let isCrossOriginBlob = false;

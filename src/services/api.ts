@@ -891,4 +891,37 @@ export const api = {
       return { success: false, status: 'ready', progress: 100 };
     }
   },
+
+  // ---------------- APP UPDATES & VERSIONING ---------------- //
+  getAppVersionInfo: async (): Promise<{
+    applicationId: string;
+    appName: string;
+    currentVersion: string;
+    minSupportedVersion: string;
+    releaseChannel: string;
+    updateAvailable: boolean;
+    downloadUrl: string;
+    apkDirectUrl: string;
+    releaseNotes: string;
+    dataPreservationGuaranteed: boolean;
+  }> => {
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetch(`${baseUrl}/api/app/version`);
+      return await safeParseResponse(res, 'Check app version');
+    } catch {
+      return {
+        applicationId: 'com.z1movies.app',
+        appName: 'Z1 Movies',
+        currentVersion: '1.0.0',
+        minSupportedVersion: '1.0.0',
+        releaseChannel: 'stable',
+        updateAvailable: false,
+        downloadUrl: 'https://github.com/ayanqureshi2732-gif/Z1-movie-/releases/latest',
+        apkDirectUrl: 'https://github.com/ayanqureshi2732-gif/Z1-movie-/releases',
+        releaseNotes: 'Seamless in-place APK updates enabled. User data preserved across upgrades.',
+        dataPreservationGuaranteed: true,
+      };
+    }
+  },
 };

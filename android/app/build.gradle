@@ -1,5 +1,11 @@
 apply plugin: 'com.android.application'
 
+// Dynamic version management with environment and property overrides
+def envVersionCode = System.getenv("APP_VERSION_CODE")
+def envVersionName = System.getenv("APP_VERSION_NAME")
+def propVersionCode = project.findProperty("versionCode")
+def propVersionName = project.findProperty("versionName")
+
 android {
     namespace = "com.z1movies.app"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +13,8 @@ android {
         applicationId "com.z1movies.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode (envVersionCode ?: propVersionCode ?: "1") as Integer
+        versionName (envVersionName ?: propVersionName ?: "1.0.0")
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,10 +22,30 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+
+    signingConfigs {
+        release {
+            def keystoreFilePath = System.getenv("ANDROID_KEYSTORE_FILE") ?: project.findProperty("RELEASE_STORE_FILE")
+            if (keystoreFilePath) {
+                def keystoreFile = file(keystoreFilePath)
+                if (keystoreFile.exists()) {
+                    storeFile keystoreFile
+                    storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("RELEASE_STORE_PASSWORD")
+                    keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: project.findProperty("RELEASE_KEY_ALIAS")
+                    keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD")
+                }
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            def releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning?.storeFile?.exists()) {
+                signingConfig releaseSigning
+            }
         }
     }
 }

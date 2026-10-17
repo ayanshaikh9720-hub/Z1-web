@@ -16,6 +16,8 @@ import { WatchlistPage } from './pages/WatchlistPage';
 import { AdminPage } from './pages/AdminPage';
 import { ContactPage } from './pages/ContactPage';
 import { LegalPage } from './pages/LegalPage';
+import { UpdatesPage } from './pages/UpdatesPage';
+import { AppUpdateModal } from './components/AppUpdateModal';
 
 const getTabFromPath = (path: string): string => {
   const clean = path.toLowerCase().replace(/\/$/, '');
@@ -25,6 +27,7 @@ const getTabFromPath = (path: string): string => {
   if (clean === '/search') return 'search';
   if (clean === '/watchlist') return 'watchlist';
   if (clean === '/contact') return 'contact';
+  if (clean === '/updates' || clean === '/download') return 'updates';
   if (clean === '/legal/dmca' || clean === '/dmca') return 'legal_dmca';
   if (clean === '/legal/terms' || clean === '/terms') return 'legal_terms';
   if (clean === '/legal/privacy' || clean === '/privacy') return 'legal_privacy';
@@ -42,6 +45,7 @@ export default function App() {
   const [playingMovie, setPlayingMovie] = useState<Movie | null>(null);
   const [user, setUser] = useState<User | null>(authStorage.getUser());
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState<boolean>(false);
   const [initialGenre, setInitialGenre] = useState<string>('Action');
 
   // Verify auth on mount and ensure initial data
@@ -182,6 +186,10 @@ export default function App() {
 
             {currentTab === 'contact' && <ContactPage />}
 
+            {currentTab === 'updates' && (
+              <UpdatesPage onBack={() => navigateTo('home')} />
+            )}
+
             {currentTab === 'legal_dmca' && (
               <LegalPage section="dmca" onBack={() => navigateTo('home')} />
             )}
@@ -215,6 +223,12 @@ export default function App() {
             navigateTo('admin');
           }
         }}
+      />
+
+      {/* App Update Delivery Modal */}
+      <AppUpdateModal
+        isOpen={updateModalOpen}
+        onClose={() => setUpdateModalOpen(false)}
       />
 
       {/* Footer */}

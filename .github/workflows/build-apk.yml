@@ -4,13 +4,27 @@ on:
   push:
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type (release, debug, or both)'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+          - both
+      version_name:
+        description: 'Custom Version Name (leave blank for auto 1.0.X)'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
@@ -24,6 +38,24 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Calculate Dynamic Versioning
+        id: versioning
+        run: |
+          # Guarantee monotonically increasing versionCode using GITHUB_RUN_NUMBER offset
+          BASE_OFFSET=1000
+          VERSION_CODE=$((BASE_OFFSET + GITHUB_RUN_NUMBER))
+          
+          if [ -n "${{ inputs.version_name }}" ]; then
+            VERSION_NAME="${{ inputs.version_name }}"
+          else
+            VERSION_NAME="1.0.${GITHUB_RUN_NUMBER}"
+          fi
+          
+          echo "Computed versionCode: $VERSION_CODE"
+          echo "Computed versionName: $VERSION_NAME"
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
+
       - name: Install dependencies
         run: |
           if [ -f "package-lock.json" ]; then
@@ -32,7 +64,7 @@ jobs:
             npm install
           fi
 
-      - name: Build web app
+      - name: Build web application
         run: npm run build
 
       - name: Setup Capacitor Android
@@ -42,14 +74,67 @@ jobs:
           fi
           npx cap sync android
 
-      - name: Build APK
+      - name: Decode Release Keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+            echo "has_keystore=true" >> $GITHUB_OUTPUT
+            echo "Release keystore decoded successfully."
+          else
+            echo "has_keystore=false" >> $GITHUB_OUTPUT
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret not found. Release signing will be skipped unless secret is configured."
+          fi
+
+      - name: Build Release APK
+        if: ${{ inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push' }}
+        env:
+          APP_VERSION_CODE: ${{ steps.versioning.outputs.version_code }}
+          APP_VERSION_NAME: ${{ steps.versioning.outputs.version_name }}
+          ANDROID_KEYSTORE_FILE: release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cd android
+          chmod +x gradlew
+          if [ "${{ steps.keystore.outputs.has_keystore }}" = "true" ]; then
+            echo "Building signed Release APK (versionCode: $APP_VERSION_CODE, versionName: $APP_VERSION_NAME)..."
+            ./gradlew assembleRelease
+          else
+            echo "Signing keystore not detected. Building debug APK as testing fallback..."
+            ./gradlew assembleDebug
+          fi
+
+      - name: Build Debug APK (if requested)
+        if: ${{ inputs.build_type == 'debug' || inputs.build_type == 'both' }}
+        env:
+          APP_VERSION_CODE: ${{ steps.versioning.outputs.version_code }}
+          APP_VERSION_NAME: ${{ steps.versioning.outputs.version_name }}
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload APK
+      - name: Clean Keystore from Workspace
+        if: always()
+        run: |
+          rm -f android/app/release.keystore
+
+      - name: Upload Signed Release APK
+        if: ${{ steps.keystore.outputs.has_keystore == 'true' && (inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push') }}
         uses: actions/upload-artifact@v4
         with:
-          name: Z1-Movies-APK
+          name: Z1-Movies-Release-APK-${{ steps.versioning.outputs.version_name }}
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload Debug APK
+        if: ${{ steps.keystore.outputs.has_keystore != 'true' || inputs.build_type == 'debug' || inputs.build_type == 'both' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z1-Movies-Debug-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: ignore
