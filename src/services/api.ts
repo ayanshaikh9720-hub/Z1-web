@@ -9,7 +9,7 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db, firebaseApi, isUserAdmin } from './firebase';
-import { Movie, User, WatchlistItem, PlaybackProgress, AdminStats } from '../types';
+import { Movie, User, WatchlistItem, PlaybackProgress, AdminStats, VideoUploadResult, VideoUploadTaskControl } from '../types';
 
 const USER_KEY = 'z1_movies_user';
 const TOKEN_KEY = 'z1_movies_token';
@@ -186,11 +186,17 @@ export const api = {
 
   // ---------------- ADMIN ACTIONS ---------------- //
   createMovie: async (data: Partial<Movie>) => {
+    if (data.videoUrl && data.videoUrl.startsWith('blob:')) {
+      throw new Error('A temporary browser blob cannot be saved as permanent movie video. Please upload the file to cloud storage or provide a permanent streaming URL.');
+    }
     let createdMovie: Movie | null = null;
+    let firestoreError: any = null;
+
     try {
       createdMovie = await firebaseApi.createMovie(data);
-    } catch (fbErr) {
+    } catch (fbErr: any) {
       console.warn('Firestore createMovie warning:', fbErr);
+      firestoreError = fbErr;
     }
 
     try {
@@ -211,6 +217,9 @@ export const api = {
     }
 
     if (!createdMovie) {
+      if (firestoreError) {
+        throw new Error(firestoreError.message || 'Failed to persist movie record to cloud database.');
+      }
       createdMovie = {
         ...data,
         id: `mov_${Date.now()}`,
@@ -223,13 +232,18 @@ export const api = {
   },
 
   updateMovie: async (id: string, data: Partial<Movie>) => {
+    if (data.videoUrl && data.videoUrl.startsWith('blob:')) {
+      throw new Error('A temporary browser blob cannot be saved as permanent movie video. Please upload the file to cloud storage or provide a permanent streaming URL.');
+    }
     let updatedMovie: Movie | null = null;
+    let firestoreError: any = null;
 
     // 1. Persist to Firebase Firestore
     try {
       updatedMovie = await firebaseApi.updateMovie(id, data);
-    } catch (fbErr) {
+    } catch (fbErr: any) {
       console.warn('Firestore updateMovie warning:', fbErr);
+      firestoreError = fbErr;
     }
 
     // 2. Persist to Express JSON database
@@ -253,6 +267,9 @@ export const api = {
     }
 
     if (!updatedMovie) {
+      if (firestoreError) {
+        throw new Error(firestoreError.message || 'Failed to update movie record in cloud database.');
+      }
       updatedMovie = {
         ...data,
         id,
@@ -526,102 +543,147 @@ export const api = {
     });
   },
 
-  uploadFile: (file: File, onProgress?: (pct: number) => void): Promise<{
-    success: boolean;
-    url: string;
-    filename: string;
-    originalName: string;
-    size: number;
-    mimetype: string;
-    isVideo: boolean;
-    message: string;
-    status?: 'processing' | 'ready' | 'failed';
-    needsTranscode?: boolean;
-    transcodeProgress?: number;
-    videoCodec?: string;
-    audioCodec?: string;
-  }> => {
-    return new Promise((resolve, reject) => {
-      const formData = new FormData();
-      formData.append('video', file);
+  // Direct Resumable Movie Video Upload to Firebase Storage
+  uploadMovieVideo: (
+    file: File,
+    movieId?: string,
+    onProgress?: (pct: number, bytesTransferred: number, totalBytes: number) => void,
+    onTaskCreated?: (controls: VideoUploadTaskControl) => void
+  ): Promise<VideoUploadResult> => {
+    return firebaseApi.uploadMovieVideo(file, movieId, onProgress, onTaskCreated);
+  },
 
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/upload');
+  // Primary Movie Upload Handler with Cloud Persistence & Progress
+  uploadFile: async (
+    file: File,
+    onProgress?: (pct: number, bytesTransferred?: number, totalBytes?: number) => void,
+    onTaskCreated?: (controls: VideoUploadTaskControl) => void
+  ): Promise<VideoUploadResult> => {
+    // 1. Format validation
+    const validExts = ['.mp4', '.webm', '.mov', '.m3u8', '.mkv'];
+    const validMimes = [
+      'video/mp4',
+      'video/webm',
+      'video/quicktime',
+      'video/x-matroska',
+      'video/mp2t',
+      'application/x-mpegurl',
+      'application/vnd.apple.mpegurl',
+    ];
 
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable && onProgress) {
-          const pct = Math.round((event.loaded / event.total) * 100);
-          onProgress(Math.min(99, pct));
+    const lower = file.name.toLowerCase();
+    const hasValidExt = validExts.some((ext) => lower.endsWith(ext));
+    const hasValidMime = validMimes.includes(file.type.toLowerCase()) || file.type.startsWith('video/');
+
+    if (!hasValidMime && !hasValidExt) {
+      throw new Error('Invalid video format. Supported formats: MP4 (H.264+AAC recommended), WebM, MOV, HLS.');
+    }
+
+    // 2. Check if Firebase Storage is active and bucket is provisioned
+    let fbErrorMessage = '';
+    const isFbStorageReady = await firebaseApi.isStorageBucketReady().catch(() => false);
+
+    if (isFbStorageReady) {
+      try {
+        const fbResult = await firebaseApi.uploadMovieVideo(
+          file,
+          undefined,
+          (pct, transferred, total) => {
+            if (onProgress) onProgress(pct, transferred, total);
+          },
+          onTaskCreated
+        );
+        return fbResult;
+      } catch (fbErr: any) {
+        console.warn('[Storage] Firebase direct upload error:', fbErr?.message);
+        if (fbErr?.message?.includes('canceled')) {
+          throw fbErr;
         }
-      };
+        fbErrorMessage = fbErr?.message || 'Firebase Storage error';
+      }
+    } else {
+      console.info('[Storage] Firebase Storage bucket is unprovisioned; routing to streaming server storage.');
+      fbErrorMessage = 'Firebase Storage bucket is not yet activated in the Firebase Console.';
+    }
 
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            const data = JSON.parse(xhr.responseText);
-            if (data.url) {
-              if (onProgress) onProgress(100);
-              resolve({
-                success: true,
-                url: data.url,
-                filename: data.filename || file.name,
-                originalName: data.originalName || file.name,
-                size: data.size || file.size,
-                mimetype: data.mimetype || file.type || 'video/mp4',
-                isVideo: true,
-                message: data.message || 'Video file uploaded and ready for streaming',
-                status: data.status || 'ready',
-                needsTranscode: Boolean(data.needsTranscode),
-                transcodeProgress: data.transcodeProgress ?? (data.status === 'processing' ? 0 : 100),
-                videoCodec: data.videoCodec,
-                audioCodec: data.audioCodec,
-              });
-              return;
-            }
-          } catch {}
-        }
+    // 3. Fallback: Upload to streaming server storage (/api/upload)
+    // Only pure Vercel serverless has a 4.5MB edge limit. Cloud Run (.run.app) and Node server handle up to 500MB!
+    const isStrictVercelServerless = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
 
-        // Fallback to local session object URL if server upload endpoint fails
-        try {
-          const objectUrl = URL.createObjectURL(file);
-          if (onProgress) onProgress(100);
-          resolve({
-            success: true,
-            url: objectUrl,
-            filename: file.name,
-            originalName: file.name,
-            size: file.size,
-            mimetype: file.type || 'video/mp4',
-            isVideo: true,
-            message: 'Video file ready for player streaming (session object)',
+    if (!isStrictVercelServerless && file.size <= 500 * 1024 * 1024) {
+      console.info('[Storage] Initiating streaming server upload fallback for video...');
+      return new Promise((resolve, reject) => {
+        const formData = new FormData();
+        formData.append('video', file);
+        formData.append('file', file);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload');
+
+        if (onTaskCreated) {
+          onTaskCreated({
+            pause: () => {},
+            resume: () => {},
+            cancel: () => xhr.abort(),
           });
-        } catch (err: any) {
-          reject(new Error(err.message || 'Could not process uploaded video file.'));
         }
-      };
 
-      xhr.onerror = () => {
-        // Fallback to local session object URL on network error
-        try {
-          const objectUrl = URL.createObjectURL(file);
-          if (onProgress) onProgress(100);
-          resolve({
-            success: true,
-            url: objectUrl,
-            filename: file.name,
-            originalName: file.name,
-            size: file.size,
-            mimetype: file.type || 'video/mp4',
-            isVideo: true,
-            message: 'Video file ready for player streaming (session object)',
-          });
-        } catch (err: any) {
-          reject(new Error('Network error uploading video file'));
-        }
-      };
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && onProgress) {
+            const pct = Math.round((event.loaded / event.total) * 100);
+            onProgress(Math.min(99, pct), event.loaded, event.total);
+          }
+        };
 
-      xhr.send(formData);
-    });
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              if (data.url) {
+                if (onProgress) onProgress(100, file.size, file.size);
+                resolve({
+                  success: true,
+                  url: data.url,
+                  storagePath: data.filename || file.name,
+                  filename: data.filename || file.name,
+                  originalName: data.originalName || file.name,
+                  size: data.size || file.size,
+                  mimetype: data.mimetype || file.type || 'video/mp4',
+                  isVideo: true,
+                  message: `Video uploaded successfully to server storage. (${fbErrorMessage ? 'Note: ' + fbErrorMessage : ''})`,
+                  status: data.status || 'ready',
+                  needsTranscode: data.needsTranscode,
+                  videoCodec: data.videoCodec,
+                  audioCodec: data.audioCodec,
+                });
+                return;
+              }
+            } catch {}
+          }
+          reject(new Error(`Server video upload failed with HTTP ${xhr.status}. ${xhr.responseText || ''}`));
+        };
+
+        xhr.onerror = () => {
+          reject(new Error(`Upload failed. Firebase Storage note: ${fbErrorMessage}. Server connection interrupted.`));
+        };
+
+        xhr.onabort = () => {
+          reject(new Error('Video upload was canceled.'));
+        };
+
+        xhr.timeout = 300000; // 5 minutes timeout for large files
+        xhr.ontimeout = () => {
+          reject(new Error('Video upload timed out (5 minutes). Please check network or use "Add Movie by Link".'));
+        };
+
+        xhr.send(formData);
+      });
+    }
+
+    // Never fall back to blob URL!
+    throw new Error(
+      `Video upload failed: ${fbErrorMessage || 'Firebase Storage bucket unavailable'}. You can also add this movie instantly using the "Add Movie by Link" section with an MP4 or HLS video URL.`
+    );
   },
 
   // ---------------- AUTHENTICATION ---------------- //

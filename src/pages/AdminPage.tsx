@@ -413,18 +413,23 @@ export const AdminPage: React.FC<AdminPageProps> = ({
 
     try {
       const res = await api.uploadFile(file, (pct) => setUploadProgress(pct));
-      let successMsg = `Upload complete: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB)`;
+      let successMsg = `Upload complete: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB) · Stored persistently`;
       if (res.needsTranscode) {
-        successMsg += ` · Non-standard codec detected (${res.videoCodec || ''}/${res.audioCodec || ''}). Auto-converting to H.264+AAC in background...`;
+        successMsg += ` · Non-standard codec detected (${res.videoCodec || ''}/${res.audioCodec || ''}).`;
       }
       setUploadSuccess(successMsg);
       if (currentNewMovie) {
+        const isServerLocal = res.url.startsWith('/uploads/');
         setCurrentNewMovie({
           ...currentNewMovie,
           videoUrl: res.url,
-          videoType: res.url.endsWith('.m3u8') ? 'hls' : 'mp4',
-          status: res.status || (res.needsTranscode ? 'processing' : 'ready'),
-          transcodeProgress: res.transcodeProgress ?? (res.needsTranscode ? 0 : 100),
+          videoType: res.url.includes('.m3u8') ? 'hls' : 'mp4',
+          storagePath: res.storagePath,
+          storageProvider: isServerLocal ? 'local' : 'firebase',
+          originalFileName: res.originalName,
+          fileSizeBytes: res.size,
+          status: res.status || 'ready',
+          transcodeProgress: res.transcodeProgress ?? 100,
         });
       }
       verifyVideoUrl(res.url);
@@ -473,6 +478,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({
       return;
     }
 
+    if (currentNewMovie.videoUrl.startsWith('blob:')) {
+      setFormError('A temporary browser blob cannot be saved as permanent movie video. Please wait for upload to cloud storage or provide a permanent streaming URL.');
+      return;
+    }
+
     const videoValidation = getSafeVideoUrl(currentNewMovie.videoUrl);
     if (!videoValidation.valid) {
       setFormError(videoValidation.error || 'Please provide a valid, safe video stream URL.');
@@ -515,6 +525,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         ...currentNewMovie,
         videoUrl: videoValidation.safeUrl,
         videoType: currentNewMovie.videoType || 'auto',
+        storagePath: currentNewMovie.storagePath,
+        storageProvider: currentNewMovie.storageProvider || (currentNewMovie.storagePath ? 'firebase' : 'external'),
+        originalFileName: currentNewMovie.originalFileName,
+        fileSizeBytes: currentNewMovie.fileSizeBytes,
         backdropUrl: currentNewMovie.backdropUrl || currentNewMovie.posterUrl,
         subtitleTracks,
       };
@@ -1762,9 +1776,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                   )}
 
                   {uploadError && (
-                    <div className="mt-2 text-xs text-red-400 flex items-center gap-1.5">
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      <span>{uploadError}</span>
+                    <div className="mt-2 p-2.5 bg-red-950/60 border border-red-800/80 rounded-xl text-xs text-red-200 space-y-1.5">
+                      <div className="flex items-start gap-1.5 font-medium">
+                        <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                        <span className="break-words">{uploadError}</span>
+                      </div>
+                      <div className="text-[11px] text-slate-300 pl-5">
+                        Tip: You can paste a direct video stream link (MP4, HLS .m3u8, Google Drive, or CDN) into the <strong className="text-white">Video Stream URL</strong> field below without needing to upload the entire file.
+                      </div>
                     </div>
                   )}
 

@@ -116,6 +116,12 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
   const [isReencoding, setIsReencoding] = useState<boolean>(false);
   const videoFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Storage tracking
+  const [storagePath, setStoragePath] = useState<string>(movie.storagePath || '');
+  const [storageProvider, setStorageProvider] = useState<'firebase' | 'supabase' | 'external' | 'local' | undefined>(movie.storageProvider);
+  const [originalFileName, setOriginalFileName] = useState<string>(movie.originalFileName || '');
+  const [fileSizeBytes, setFileSizeBytes] = useState<number | undefined>(movie.fileSizeBytes);
+
   const handleVideoFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -127,13 +133,17 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
 
     try {
       const res = await api.uploadFile(file, (pct) => setVideoUploadProgress(pct));
-      let successMsg = `Video uploaded: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB)`;
+      let successMsg = `Video uploaded: ${res.originalName} (${Math.round(res.size / 1024 / 1024)} MB) · Stored persistently`;
       if (res.needsTranscode) {
         successMsg += ` · Codec conversion to H.264 + AAC initiated (${res.videoCodec || ''}/${res.audioCodec || ''})`;
       }
       setVideoUploadSuccess(successMsg);
       setVideoUrl(res.url);
-      setVideoType(res.url.endsWith('.m3u8') ? 'hls' : 'mp4');
+      setVideoType(res.url.includes('.m3u8') ? 'hls' : 'mp4');
+      if (res.storagePath) setStoragePath(res.storagePath);
+      setStorageProvider(res.url.startsWith('/uploads/') ? 'local' : 'firebase');
+      if (res.originalName) setOriginalFileName(res.originalName);
+      if (res.size) setFileSizeBytes(res.size);
     } catch (err: any) {
       setVideoUploadError(err.message || 'Video upload failed.');
     } finally {
@@ -339,6 +349,11 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
       return;
     }
 
+    if (videoUrl.startsWith('blob:')) {
+      setError('A temporary browser blob URL cannot be saved as permanent movie video. Please wait for upload to finish or provide a permanent streaming URL.');
+      return;
+    }
+
     setSaving(true);
     setError('');
     setSuccessMessage('');
@@ -353,7 +368,7 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
       // Prepare updated movie object:
       // CRITICAL GUARANTEE:
       // - Keep existing movie video file, videoUrl, videoType, downloadUrls, views, downloads strictly unchanged.
-      // - Update only edited metadata fields and new thumbnail.
+      // - Update only edited metadata fields, storage metadata, and new thumbnail.
       const updatedMoviePayload: Movie = {
         ...movie,
         title: title.trim(),
@@ -374,6 +389,10 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
         subtitleTracks: subtitleTracks.filter((s) => s.language && s.src),
         videoUrl: videoUrl.trim() || movie.videoUrl,
         videoType: videoType || movie.videoType || 'auto',
+        storagePath: storagePath || movie.storagePath,
+        storageProvider: storageProvider || movie.storageProvider || (storagePath ? 'firebase' : 'external'),
+        originalFileName: originalFileName || movie.originalFileName,
+        fileSizeBytes: fileSizeBytes || movie.fileSizeBytes,
         downloadUrls: movie.downloadUrls || [],
         updatedAt: new Date().toISOString(),
       };
@@ -1605,9 +1624,14 @@ export const EditMovieModal: React.FC<EditMovieModalProps> = ({
             )}
 
             {videoUploadError && (
-              <div className="p-2.5 bg-red-950/40 border border-red-800 rounded-xl text-xs text-red-300 flex items-center gap-2">
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                <span>{videoUploadError}</span>
+              <div className="p-2.5 bg-red-950/40 border border-red-800 rounded-xl text-xs text-red-300 space-y-1">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span className="break-words font-medium">{videoUploadError}</span>
+                </div>
+                <div className="text-[11px] text-slate-400 pl-5">
+                  Tip: You can paste any direct video URL (MP4, HLS, or cloud stream) in the Video URL field above without re-uploading.
+                </div>
               </div>
             )}
           </div>

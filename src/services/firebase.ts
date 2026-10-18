@@ -31,9 +31,10 @@ import {
   ref as storageRef,
   uploadBytesResumable,
   getDownloadURL,
+  deleteObject,
 } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { Movie, User, DownloadOption, AdminStats, VideoFormatType } from '../types';
+import { Movie, User, DownloadOption, AdminStats, VideoFormatType, VideoUploadResult, VideoUploadTaskControl } from '../types';
 import { processThumbnailFile, normalizePosterUrl } from '../utils/imageUtils';
 import { getSafeVideoUrl } from '../utils/videoUrlHelper';
 
@@ -48,8 +49,52 @@ export const auth = getAuth(app);
 
 // Initialize Firebase Storage
 export const storage = getStorage(app);
-storage.maxUploadRetryTime = 25000;
-storage.maxOperationRetryTime = 25000;
+// Use standard 10-minute retry window instead of premature 25s timeout
+storage.maxUploadRetryTime = 600000;
+storage.maxOperationRetryTime = 120000;
+
+// Track storage bucket availability to avoid long retry loops when Storage is not activated in Console
+let storageBucketAvailable: boolean | null = null;
+let lastStorageCheckTime = 0;
+
+export async function isFirebaseStorageBucketReady(): Promise<boolean> {
+  const now = Date.now();
+  if (storageBucketAvailable !== null && now - lastStorageCheckTime < 60000) {
+    return storageBucketAvailable;
+  }
+
+  try {
+    const bucket = firebaseConfig.storageBucket;
+    if (!bucket) {
+      storageBucketAvailable = false;
+      lastStorageCheckTime = now;
+      return false;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(`https://firebasestorage.googleapis.com/v0/b/${bucket}/o`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    // If bucket does not exist or has not been initialized in Firebase Console, Google returns 404
+    if (res.status === 404) {
+      console.warn(`[Firebase Storage] Bucket "${bucket}" returned 404 (Not Found). Storage is not yet activated in the Firebase Console.`);
+      storageBucketAvailable = false;
+      lastStorageCheckTime = now;
+      return false;
+    }
+
+    storageBucketAvailable = true;
+    lastStorageCheckTime = now;
+    return true;
+  } catch {
+    // If probe times out or network is offline, don't assume available
+    return false;
+  }
+}
 
 // Test connection on boot per SKILL.md
 async function testConnection() {
@@ -375,6 +420,10 @@ function docToMovie(docSnap: any): Movie {
     backdropUrl,
     videoUrl: data.videoUrl || '',
     videoType: data.videoType || 'mp4',
+    storagePath: data.storagePath || undefined,
+    storageProvider: data.storageProvider || (data.storagePath ? 'firebase' : undefined),
+    originalFileName: data.originalFileName || undefined,
+    fileSizeBytes: data.fileSizeBytes || undefined,
     downloadUrls: Array.isArray(data.downloadUrls) ? data.downloadUrls : [],
     trailerUrl: data.trailerUrl || undefined,
     audioTracks: Array.isArray(data.audioTracks) ? data.audioTracks : [],
@@ -816,8 +865,163 @@ export const firebaseApi = {
     });
   },
 
+  // Direct Resumable Movie Video Upload to Firebase Storage
+  uploadMovieVideo: (
+    file: File,
+    movieId?: string,
+    onProgress?: (pct: number, bytesTransferred: number, totalBytes: number) => void,
+    onTaskCreated?: (controls: VideoUploadTaskControl) => void
+  ): Promise<VideoUploadResult> => {
+    return new Promise((resolve, reject) => {
+      // 1. Format validation
+      const validExtensions = ['.mp4', '.webm', '.mov', '.m3u8', '.mkv'];
+      const validMimes = [
+        'video/mp4',
+        'video/webm',
+        'video/quicktime',
+        'video/x-matroska',
+        'video/mp2t',
+        'application/x-mpegurl',
+        'application/vnd.apple.mpegurl',
+      ];
+
+      const lowerName = file.name.toLowerCase();
+      const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
+      const hasValidMime = validMimes.includes(file.type.toLowerCase()) || file.type.startsWith('video/');
+
+      if (!hasValidMime && !hasValidExt) {
+        reject(new Error('Invalid video format. Supported formats: MP4 (H.264+AAC recommended), WebM, MOV, HLS.'));
+        return;
+      }
+
+      // Check for MKV/AVI notice
+      if (lowerName.endsWith('.mkv') || lowerName.endsWith('.avi')) {
+        console.warn(`[Storage] Uploading ${file.name}: Note that MKV/AVI containers may require transcoding for native mobile playback.`);
+      }
+
+      // 2. Build cloud storage target path
+      const cleanFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const folderId = movieId || `draft_${Date.now()}`;
+      const uniqueFileName = `${Date.now()}_${cleanFileName}`;
+      const fullPath = `movies/${folderId}/${uniqueFileName}`;
+
+      const targetRef = storageRef(storage, fullPath);
+
+      const metadata = {
+        contentType: file.type || 'video/mp4',
+        customMetadata: {
+          originalName: file.name,
+          size: String(file.size),
+          uploadedBy: auth.currentUser?.email || 'admin',
+          folderId,
+          uploadedAt: new Date().toISOString(),
+        },
+      };
+
+      // Fast check if bucket is already known to be unavailable
+      if (storageBucketAvailable === false) {
+        const unavailErr = new Error(
+          `Firebase Storage is not enabled for project "${firebaseConfig.projectId}". The storage bucket "${firebaseConfig.storageBucket}" was not found (HTTP 404). To enable: Open Firebase Console -> Build -> Storage -> Click "Get Started".`
+        );
+        (unavailErr as any).code = 'storage/bucket-not-found';
+        reject(unavailErr);
+        return;
+      }
+
+      try {
+        const uploadTask = uploadBytesResumable(targetRef, file, metadata);
+
+        if (onTaskCreated) {
+          onTaskCreated({
+            pause: () => uploadTask.pause(),
+            resume: () => uploadTask.resume(),
+            cancel: () => uploadTask.cancel(),
+          });
+        }
+
+        uploadTask.on(
+          'state_changed',
+          (snapshot) => {
+            const progress = snapshot.totalBytes > 0
+              ? Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)
+              : 0;
+            if (onProgress) {
+              onProgress(Math.min(100, Math.max(0, progress)), snapshot.bytesTransferred, snapshot.totalBytes);
+            }
+          },
+          (error: any) => {
+            console.error('[Firebase Storage Upload Error]:', error);
+            let errorMessage = 'Firebase Storage upload failed: ' + (error?.message || 'Unknown error');
+            if (error?.code === 'storage/canceled') {
+              errorMessage = 'Upload was canceled by the user.';
+            } else if (error?.code === 'storage/unauthorized') {
+              errorMessage = 'Upload unauthorized: Only authenticated administrators can upload movie files. Please ensure you are logged into an admin account.';
+            } else if (error?.code === 'storage/retry-limit-exceeded') {
+              storageBucketAvailable = false;
+              errorMessage = `Firebase Storage retry limit exceeded. The storage bucket (${firebaseConfig.storageBucket}) may not be enabled in Firebase Console for project "${firebaseConfig.projectId}", or the network connection timed out.`;
+            } else if (error?.code === 'storage/quota-exceeded') {
+              errorMessage = 'Firebase Storage quota exceeded. Please check storage bucket usage in Firebase Console.';
+            } else if (error?.code === 'storage/unknown') {
+              storageBucketAvailable = false;
+              errorMessage = `Storage service error. Verify that Firebase Storage is enabled in the Firebase Console (${firebaseConfig.projectId}).`;
+            }
+            const enhancedError = new Error(errorMessage);
+            (enhancedError as any).code = error?.code || 'storage/unknown';
+            (enhancedError as any).originalError = error;
+            reject(enhancedError);
+          },
+          async () => {
+            try {
+              const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
+              if (!downloadUrl) {
+                reject(new Error('Failed to retrieve permanent download URL from Firebase Storage.'));
+                return;
+              }
+
+              resolve({
+                success: true,
+                url: downloadUrl,
+                storagePath: fullPath,
+                filename: uniqueFileName,
+                originalName: file.name,
+                size: file.size,
+                mimetype: file.type || 'video/mp4',
+                isVideo: true,
+                message: 'Video uploaded securely to Firebase Storage.',
+                status: 'ready',
+              });
+            } catch (urlErr: any) {
+              reject(new Error(`File was uploaded but download URL retrieval failed: ${urlErr.message}`));
+            }
+          }
+        );
+      } catch (initErr: any) {
+        reject(new Error(`Failed to initiate resumable Firebase upload: ${initErr.message}`));
+      }
+    });
+  },
+
+  // Delete video file from Firebase Storage
+  deleteStorageFile: async (pathOrUrl: string): Promise<void> => {
+    try {
+      if (!pathOrUrl) return;
+      let targetRef;
+      if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
+        targetRef = storageRef(storage, pathOrUrl);
+      } else {
+        targetRef = storageRef(storage, pathOrUrl);
+      }
+      await deleteObject(targetRef);
+    } catch (err: any) {
+      console.warn('[Firebase Storage] Could not delete storage object:', err.message);
+    }
+  },
+
   // 4. Admin: Create Movie
   createMovie: async (movieData: Partial<Movie>): Promise<Movie> => {
+    if (movieData.videoUrl && movieData.videoUrl.startsWith('blob:')) {
+      throw new Error('Cannot save temporary in-memory blob URL. Please upload the video to cloud storage or provide a permanent streaming URL.');
+    }
     const dataToSave = {
       title: movieData.title || '',
       description: movieData.description || '',
@@ -825,6 +1029,10 @@ export const firebaseApi = {
       backdropUrl: movieData.backdropUrl || '',
       videoUrl: movieData.videoUrl || '',
       videoType: movieData.videoType || 'mp4',
+      storagePath: movieData.storagePath || '',
+      storageProvider: movieData.storageProvider || (movieData.storagePath ? 'firebase' : 'external'),
+      originalFileName: movieData.originalFileName || '',
+      fileSizeBytes: movieData.fileSizeBytes || 0,
       downloadUrls: movieData.downloadUrls || [],
       audioTracks: movieData.audioTracks || [],
       subtitleTracks: movieData.subtitleTracks || [],
@@ -850,6 +1058,9 @@ export const firebaseApi = {
 
   // 5. Admin: Update Movie
   updateMovie: async (id: string, movieData: Partial<Movie>): Promise<Movie> => {
+    if (movieData.videoUrl && movieData.videoUrl.startsWith('blob:')) {
+      throw new Error('Cannot save temporary in-memory blob URL. Please upload the video to cloud storage or provide a permanent streaming URL.');
+    }
     const docRef = doc(db, 'movies', id);
     const updatePayload = {
       ...movieData,
@@ -1122,4 +1333,5 @@ export const firebaseApi = {
       };
     });
   },
+  isStorageBucketReady: isFirebaseStorageBucketReady,
 };

@@ -26,7 +26,7 @@ def getComputedVersionCode() {
             return Integer.parseInt(propCode.toString().trim())
         } catch (Exception ignored) {}
     }
-    return 1
+    return 1014
 }
 
 def getComputedVersionName() {
@@ -38,12 +38,12 @@ def getComputedVersionName() {
     if (propName != null && !propName.toString().trim().isEmpty()) {
         return propName.toString().trim()
     }
-    return "1.0.0"
+    return "1.0.14"
 }
 
 android {
     namespace = "com.z1movies.app"
-    compileSdk = getExtInteger('compileSdkVersion', 35)
+    compileSdk = getExtInteger('compileSdkVersion', 36)
     defaultConfig {
         applicationId "com.z1movies.app"
         minSdkVersion getExtInteger('minSdkVersion', 24)

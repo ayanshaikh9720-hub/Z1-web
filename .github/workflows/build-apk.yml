@@ -14,10 +14,14 @@ on:
           - debug
           - release
           - both
-      version_name:
-        description: 'Custom Version Name (leave blank for auto 1.0.X)'
+      version_code:
+        description: 'Version Code (leave blank for auto 1014+)'
         required: false
-        default: ''
+        default: '1014'
+      version_name:
+        description: 'Custom Version Name (e.g. 1.0.14)'
+        required: false
+        default: '1.0.14'
 
 jobs:
   build:
@@ -59,14 +63,27 @@ jobs:
       - name: Calculate Dynamic Versioning
         id: versioning
         run: |
-          # Guarantee monotonically increasing versionCode using GITHUB_RUN_NUMBER offset
-          BASE_OFFSET=1000
-          VERSION_CODE=$((BASE_OFFSET + GITHUB_RUN_NUMBER))
+          # Guarantee monotonically increasing versionCode with base progression starting at 1014
+          # If previous was 1013 (run 13), run 14 gives 1014. If GITHUB_RUN_NUMBER is lower, floor at 1014.
+          if [ -n "${{ inputs.version_code }}" ]; then
+            VERSION_CODE="${{ inputs.version_code }}"
+          else
+            RUN_CODE=$((1000 + GITHUB_RUN_NUMBER))
+            if [ "$RUN_CODE" -lt 1014 ]; then
+              VERSION_CODE=1014
+            else
+              VERSION_CODE="$RUN_CODE"
+            fi
+          fi
           
           if [ -n "${{ inputs.version_name }}" ]; then
             VERSION_NAME="${{ inputs.version_name }}"
           else
-            VERSION_NAME="1.0.${GITHUB_RUN_NUMBER}"
+            if [ "$GITHUB_RUN_NUMBER" -le 13 ]; then
+              VERSION_NAME="1.0.14"
+            else
+              VERSION_NAME="1.0.${GITHUB_RUN_NUMBER}"
+            fi
           fi
           
           echo "Computed versionCode: $VERSION_CODE"
@@ -100,6 +117,7 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          TARGET_TYPE: ${{ steps.target.outputs.build_type }}
         run: |
           set +x
           MISSING=""
@@ -109,21 +127,27 @@ jobs:
           if [ -z "$KEY_PASSWORD" ]; then MISSING="$MISSING ANDROID_KEY_PASSWORD"; fi
 
           if [ -n "$MISSING" ]; then
-            echo "::error::Release build halted! The following required GitHub Secrets are missing or empty:$MISSING"
+            echo "::error::Release build cannot proceed! Required GitHub Secrets missing:$MISSING"
             echo ""
             echo "=========================================================================================="
-            echo "CRITICAL: A Release APK requires production signing credentials to support in-place updates."
-            echo "Please configure the 4 signing secrets in GitHub:"
-            echo "  Repository -> Settings -> Secrets and variables -> Actions -> New repository secret"
-            echo "    1. ANDROID_KEYSTORE_BASE64  (Base64 encoded .keystore / .jks file)"
-            echo "    2. ANDROID_KEYSTORE_PASSWORD (Keystore storepass password)"
-            echo "    3. ANDROID_KEY_ALIAS         (Key alias name)"
-            echo "    4. ANDROID_KEY_PASSWORD      (Key password)"
+            echo "A signed Release APK requires production signing credentials."
+            echo "Required GitHub Secrets:"
+            echo "  1. ANDROID_KEYSTORE_BASE64   (Base64 encoded .keystore / .jks file)"
+            echo "  2. ANDROID_KEYSTORE_PASSWORD  (Keystore storepass password)"
+            echo "  3. ANDROID_KEY_ALIAS          (Key alias name)"
+            echo "  4. ANDROID_KEY_PASSWORD       (Key password)"
             echo ""
-            echo "TIP: If you want to build and test an APK without signing secrets, run the workflow"
-            echo "with 'build_type: debug' instead."
+            echo "TIP: To build and test a free APK without signing credentials, run this workflow with:"
+            echo "     build_type: debug"
             echo "=========================================================================================="
-            exit 1
+            
+            if [ "$TARGET_TYPE" = "release" ]; then
+              exit 1
+            else
+              echo "has_keystore=false" >> $GITHUB_OUTPUT
+              echo "::warning::Skipping release build due to missing secrets. Debug APK will still be built."
+              exit 0
+            fi
           fi
 
           # Decode Base64 keystore into android/app/release.keystore
@@ -131,22 +155,22 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
           
           if [ ! -s android/app/release.keystore ]; then
-            echo "::error::Decoded keystore file is empty or corrupted! Please verify ANDROID_KEYSTORE_BASE64 secret format."
-            exit 1
+            echo "::error::Decoded keystore file is empty or corrupted! Please check ANDROID_KEYSTORE_BASE64."
+            if [ "$TARGET_TYPE" = "release" ]; then exit 1; else echo "has_keystore=false" >> $GITHUB_OUTPUT; exit 0; fi
           fi
 
           # Validate keystore integrity and alias using Java keytool without logging secrets
           echo "Validating keystore integrity and key alias..."
           if ! keytool -list -keystore android/app/release.keystore -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
-            echo "::error::Keystore verification failed! Either ANDROID_KEYSTORE_PASSWORD is incorrect or ANDROID_KEY_ALIAS ('$KEY_ALIAS') was not found in the keystore."
-            exit 1
+            echo "::error::Keystore verification failed! Either ANDROID_KEYSTORE_PASSWORD is incorrect or ANDROID_KEY_ALIAS ('$KEY_ALIAS') was not found in keystore."
+            if [ "$TARGET_TYPE" = "release" ]; then exit 1; else echo "has_keystore=false" >> $GITHUB_OUTPUT; exit 0; fi
           fi
 
           echo "Keystore and alias '$KEY_ALIAS' verified successfully."
           echo "has_keystore=true" >> $GITHUB_OUTPUT
 
       - name: Build Release APK
-        if: ${{ steps.target.outputs.build_type == 'release' || steps.target.outputs.build_type == 'both' }}
+        if: ${{ (steps.target.outputs.build_type == 'release' || steps.target.outputs.build_type == 'both') && steps.keystore.outputs.has_keystore == 'true' }}
         env:
           APP_VERSION_CODE: ${{ steps.versioning.outputs.version_code }}
           APP_VERSION_NAME: ${{ steps.versioning.outputs.version_name }}
@@ -196,7 +220,7 @@ jobs:
           rm -f android/app/release.keystore
 
       - name: Upload Signed Release APK
-        if: ${{ steps.target.outputs.build_type == 'release' || steps.target.outputs.build_type == 'both' }}
+        if: ${{ (steps.target.outputs.build_type == 'release' || steps.target.outputs.build_type == 'both') && steps.keystore.outputs.has_keystore == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: Z1-Movies-Release-APK-${{ steps.versioning.outputs.version_name }}

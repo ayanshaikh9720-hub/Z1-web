@@ -1,0 +1,32 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email != null && request.auth.token.email in ['admin@z1movies.com', 'ayanshaikh9720@gmail.com']
+      );
+    }
+
+    // Movie stream files: allow public/user read for streaming playback, only admin write
+    match /movies/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Thumbnails and posters: allow public read, admin write
+    match /thumbnails/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Default deny for any other storage path
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

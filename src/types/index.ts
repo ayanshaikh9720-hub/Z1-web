@@ -50,10 +50,37 @@ export interface Movie {
   status?: 'processing' | 'ready' | 'failed';
   transcodeProgress?: number; // 0 to 100
   transcodeError?: string;
+  storagePath?: string; // Persistent Firebase Storage object path (e.g. movies/id/filename.mp4)
+  storageProvider?: 'firebase' | 'supabase' | 'external' | 'local';
+  originalFileName?: string;
+  fileSizeBytes?: number;
   views: number;
   downloads: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface VideoUploadTaskControl {
+  pause: () => void;
+  resume: () => void;
+  cancel: () => void;
+}
+
+export interface VideoUploadResult {
+  success: boolean;
+  url: string;
+  storagePath: string;
+  filename: string;
+  originalName: string;
+  size: number;
+  mimetype: string;
+  isVideo: boolean;
+  message: string;
+  status?: 'processing' | 'ready' | 'failed';
+  needsTranscode?: boolean;
+  transcodeProgress?: number;
+  videoCodec?: string;
+  audioCodec?: string;
 }
 
 export interface User {
