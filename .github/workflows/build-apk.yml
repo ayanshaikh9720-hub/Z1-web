@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: 'Build Type (release, debug, or both)'
+        description: 'Build Type: debug (free/test, no keystore needed), release (requires 4 signing secrets), or both'
         required: true
-        default: 'release'
+        default: 'debug'
         type: choice
         options:
-          - release
           - debug
+          - release
           - both
       version_name:
         description: 'Custom Version Name (leave blank for auto 1.0.X)'
@@ -37,6 +37,24 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+
+      - name: Determine Target Build Type
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SELECTED_TYPE="${{ inputs.build_type }}"
+          else
+            # On git push: default to release if keystore secret is configured, otherwise default to debug
+            if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+              SELECTED_TYPE="release"
+            else
+              SELECTED_TYPE="debug"
+              echo "::notice::ANDROID_KEYSTORE_BASE64 secret not found for push. Building Debug APK for testing."
+            fi
+          fi
+
+          echo "Target build_type: $SELECTED_TYPE"
+          echo "build_type=$SELECTED_TYPE" >> $GITHUB_OUTPUT
 
       - name: Calculate Dynamic Versioning
         id: versioning
@@ -75,7 +93,7 @@ jobs:
           npx cap sync android
 
       - name: Validate and Decode Release Keystore
-        if: ${{ inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push' }}
+        if: ${{ steps.target.outputs.build_type == 'release' || steps.target.outputs.build_type == 'both' }}
         id: keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -101,6 +119,9 @@ jobs:
             echo "    2. ANDROID_KEYSTORE_PASSWORD (Keystore storepass password)"
             echo "    3. ANDROID_KEY_ALIAS         (Key alias name)"
             echo "    4. ANDROID_KEY_PASSWORD      (Key password)"
+            echo ""
+            echo "TIP: If you want to build and test an APK without signing secrets, run the workflow"
+            echo "with 'build_type: debug' instead."
             echo "=========================================================================================="
             exit 1
           fi
@@ -125,7 +146,7 @@ jobs:
           echo "has_keystore=true" >> $GITHUB_OUTPUT
 
       - name: Build Release APK
-        if: ${{ inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push' }}
+        if: ${{ steps.target.outputs.build_type == 'release' || steps.target.outputs.build_type == 'both' }}
         env:
           APP_VERSION_CODE: ${{ steps.versioning.outputs.version_code }}
           APP_VERSION_NAME: ${{ steps.versioning.outputs.version_name }}
@@ -149,8 +170,8 @@ jobs:
           APK_SIZE=$(ls -lh "$RELEASE_APK" | awk '{print $5}')
           echo "Signed Release APK successfully generated: android/$RELEASE_APK ($APK_SIZE)"
 
-      - name: Build Debug APK (Explicitly Requested)
-        if: ${{ inputs.build_type == 'debug' || inputs.build_type == 'both' }}
+      - name: Build Debug APK
+        if: ${{ steps.target.outputs.build_type == 'debug' || steps.target.outputs.build_type == 'both' }}
         env:
           APP_VERSION_CODE: ${{ steps.versioning.outputs.version_code }}
           APP_VERSION_NAME: ${{ steps.versioning.outputs.version_name }}
@@ -166,23 +187,26 @@ jobs:
             exit 1
           fi
 
+          APK_SIZE=$(ls -lh "$DEBUG_APK" | awk '{print $5}')
+          echo "Debug APK successfully generated: android/$DEBUG_APK ($APK_SIZE)"
+
       - name: Clean Keystore from Workspace
         if: always()
         run: |
           rm -f android/app/release.keystore
 
       - name: Upload Signed Release APK
-        if: ${{ inputs.build_type == 'release' || inputs.build_type == 'both' || github.event_name == 'push' }}
+        if: ${{ steps.target.outputs.build_type == 'release' || steps.target.outputs.build_type == 'both' }}
         uses: actions/upload-artifact@v4
         with:
           name: Z1-Movies-Release-APK-${{ steps.versioning.outputs.version_name }}
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
-      - name: Upload Debug APK (Explicitly Requested)
-        if: ${{ inputs.build_type == 'debug' || inputs.build_type == 'both' }}
+      - name: Upload Debug APK
+        if: ${{ steps.target.outputs.build_type == 'debug' || steps.target.outputs.build_type == 'both' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Z1-Movies-Debug-APK
+          name: Z1-Movies-Debug-APK-${{ steps.versioning.outputs.version_name }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
